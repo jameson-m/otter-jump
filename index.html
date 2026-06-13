@@ -108,12 +108,24 @@
   const Sound = (() => {
     let ctx = null;
     let muted = false;
+    let unlocked = false;
+    // Must be called from inside a user-gesture handler (iOS requirement).
     function ensure() {
       if (!ctx) {
         const AC = window.AudioContext || window.webkitAudioContext;
         if (AC) ctx = new AC();
       }
       if (ctx && ctx.state === "suspended") ctx.resume();
+      // Play one near-silent buffer the first time to fully unlock iOS audio.
+      if (ctx && !unlocked) {
+        try {
+          const src = ctx.createBufferSource();
+          src.buffer = ctx.createBuffer(1, 1, 22050);
+          src.connect(ctx.destination);
+          src.start(0);
+          unlocked = true;
+        } catch (e) {}
+      }
       return ctx;
     }
     function tone(freqStart, freqEnd, dur, type, vol) {
@@ -141,6 +153,8 @@
       win:     () => { [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => tone(f, f, 0.16, "triangle", 0.16), i * 110)); },
       toggleMute: () => { muted = !muted; return muted; },
       isMuted: () => muted,
+      suspend: () => { if (ctx && ctx.state === "running") ctx.suspend(); },
+      resume:  () => { if (ctx && ctx.state === "suspended") ctx.resume(); },
     };
   })();
 
@@ -319,12 +333,20 @@
     if (e.code === "Space" || e.code === "ArrowUp" || e.code === "KeyW") releaseJump();
   });
 
-  // Pointer events cover mouse, touch and pen without double-firing.
+  // Pointer events cover mouse, touch and pen without double-firing. The canvas
+  // fills the screen, so a tap anywhere = jump. pointerup is bound to window so a
+  // release that drifts off the canvas still registers.
   canvas.addEventListener("pointerdown", (e) => { e.preventDefault(); pressJump(); }, { passive: false });
-  window.addEventListener("pointerup", () => releaseJump());
+  window.addEventListener("pointerup", releaseJump);
+  window.addEventListener("pointercancel", releaseJump); // iOS may cancel instead of up
   window.addEventListener("contextmenu", (e) => e.preventDefault());
-  // Avoid the page scrolling/zooming on touch.
+
+  // Suppress iOS scrolling, pinch-zoom, double-tap-zoom and long-press callouts
+  // so the only thing a touch does is jump.
   document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+  document.addEventListener("dblclick", (e) => e.preventDefault(), { passive: false });
+  ["gesturestart", "gesturechange", "gestureend"].forEach((ev) =>
+    document.addEventListener(ev, (e) => e.preventDefault(), { passive: false }));
 
   // ----------------------------------------------------------------------------
   // Collision helpers
@@ -1052,6 +1074,20 @@
   const STEP = 1 / 120;
   let acc = 0;
   let last = 0;
+
+  // When the app is backgrounded, requestAnimationFrame pauses. On return, reset
+  // the clock so the accumulated wall-time isn't fast-forwarded into the sim, and
+  // suspend/resume audio so iOS isn't left holding the context open in the
+  // background.
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      Sound.suspend();
+    } else {
+      last = 0; // next frame() re-seeds the clock, so delta ~0 (no fast-forward)
+      acc = 0;
+      Sound.resume();
+    }
+  });
 
   function frame(now) {
     if (!last) last = now;
