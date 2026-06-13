@@ -9,6 +9,9 @@
 //   - Bump VERSION to ship an update; old caches are deleted on activate.
 
 const VERSION = "otter-jump-v1";
+// Every asset the game requests at runtime must be listed here (and VERSION
+// bumped) so it's available offline. Currently: the page, manifest, the level
+// generator module, the character manifest + sprites, and the icons.
 const SHELL = [
   "./",
   "./index.html",
