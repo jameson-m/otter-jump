@@ -6,13 +6,15 @@ The otter runs forward on its own. Your only job is to **jump**: time it to clea
 
 ## Play
 
-Just open `index.html` in any modern browser:
+The game loads code as ES modules, so it needs to be **served over http** (not
+opened via `file://`). From the project folder:
 
 ```sh
-open index.html        # macOS
-# or serve it (nicer for mobile testing on your LAN):
 python3 -m http.server 4321   # then visit http://localhost:4321/index.html
 ```
+
+That URL also works for testing on a phone over your LAN, and is exactly how the
+deployed GitHub Pages version runs.
 
 ## Controls
 
@@ -28,21 +30,25 @@ button jumps higher (variable jump height).
 ## Goal
 
 - Reach the **shiny rock** on its pedestal at the end of the course to win.
-- Grab **fish** (×17) for a higher score. They're optional — many float over
-  gaps to reward bigger jumps. Your best catch is saved locally.
+- Grab **fish** scattered along the way for a higher score. They're optional —
+  many float over gaps to reward bigger jumps. Your best catch is saved locally.
 - Avoid **sea-urchins** and don't fall in the **water** — either is a splash.
 
 ## How it's built
 
-Everything lives in [`index.html`](index.html):
+- [`index.html`](index.html) — the game: a **fixed-timestep loop** (120 Hz
+  physics) with forgiving jump mechanics (coyote-time, jump-buffering, variable
+  jump height), a **portrait-first world camera** that fills any screen with
+  iOS safe-area support, and **no asset files** (the otter, fish, urchins, rock,
+  parallax scenery, and WebAudio sound effects are all generated in code).
+- [`js/levelgen.js`](js/levelgen.js) — the **procedural level generator**, shared
+  by the game and the tests. Levels are seeded by (level number, difficulty) so
+  they're reproducible, and every gap is placed within the otter's verified jump
+  reach. Each generated level is additionally validated by a faithful physics
+  `simulate()` so it's **guaranteed beatable**.
 
-- **Fixed-timestep loop** (120 Hz physics, rendered via `requestAnimationFrame`)
-  for consistent "game feel" regardless of refresh rate.
-- **Forgiving jump mechanics:** coyote-time (jump just after leaving a ledge),
-  jump-buffering (press just before landing), and variable jump height.
-- **Hand-tuned level** of platforms, gaps, urchins, fish, and the goal — designed
-  so every gap is clearable with a single well-timed jump.
-- **No assets:** the otter, fish, urchins, rock, parallax scenery, and all sound
-  effects (WebAudio) are drawn/synthesized procedurally in code.
-- **Responsive:** renders at a logical 1280×720 and letterboxes to fit any
-  screen, with high-DPI support and touch handling for mobile.
+## Tests
+
+```sh
+npm test   # generates 600 levels across difficulties and asserts each is solvable
+```
