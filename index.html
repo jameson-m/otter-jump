@@ -238,8 +238,28 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
 
   const otter = {
     x: startX, y: startTop - PHYS.OTTER_H, w: PHYS.OTTER_W, h: PHYS.OTTER_H,
-    vy: 0, grounded: true, coyote: 0, runAnim: 0, jumpPose: 0, face: 1,
+    vy: 0, grounded: true, coyote: 0, runAnim: 0, jumpPose: 0, face: 1, landAnim: 0,
   };
+
+  // ----------------------------------------------------------------------------
+  // Playable characters — the otter (vector) plus hand-drawn image sprites loaded
+  // from the manifest. Until an image loads (or if it fails), we fall back to the
+  // vector otter, so the game is always playable.
+  // ----------------------------------------------------------------------------
+  const CHARACTERS = [{ id: "otter", name: "Otter" }]; // classic, always available
+  const charImages = {};                               // id -> loaded HTMLImageElement
+  let character = LS.get("otterjump.char", "one");      // selected character id
+  fetch("assets/characters/characters.json")
+    .then((r) => r.json())
+    .then((data) => {
+      for (const c of (data.characters || [])) {
+        CHARACTERS.push({ id: c.id, name: c.name });
+        const img = new Image();
+        img.onload = () => { charImages[c.id] = img; };
+        img.src = "assets/characters/" + c.file;
+      }
+    })
+    .catch(() => {}); // offline/first paint: vector otter is the fallback
 
   let score = 0;
   let bufferTimer = 0;   // jump-buffer countdown
@@ -502,6 +522,7 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
         otter.vy = 0;
         if (!otter.grounded && otter.jumpPose > 0) {
           Sound.land();
+          otter.landAnim = 1; // triggers a landing squash on the character sprite
           spawnParticles(otter.x + otter.w / 2, otter.y + otter.h, 6, {
             angle: Math.PI / 2, spread: 1.8, speedMin: 40, speedMax: 150,
             life: 0.28, size: 4, color: ["#d8c39a", "#c2a877"], grav: 800,
@@ -543,6 +564,7 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
 
     // --- Animation + camera ---
     otter.runAnim += dt * (otter.grounded ? 12 : 4);
+    if (otter.landAnim > 0) otter.landAnim = Math.max(0, otter.landAnim - dt * 5);
     const maxCam = WORLD_W - viewW;
     camX = maxCam <= 0
       ? maxCam / 2 // view wider than the whole world (ultra-wide): center it
@@ -937,6 +959,53 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
     }
   }
 
+  // Draws the selected character at the otter's hitbox. Hand-drawn characters are
+  // image sprites animated procedurally (no frame sheets); the otter (or any
+  // not-yet-loaded sprite) falls back to the vector drawing. The physics hitbox is
+  // unchanged — the sprite is purely visual.
+  function drawCharacter(wx, wy) {
+    const img = charImages[character];
+    if (character === "otter" || !img) { drawOtter(wx, wy); return; }
+
+    const t = otter.runAnim;
+    const airborne = !otter.grounded && state === STATE.PLAYING;
+    const cx = wx + otter.w / 2;
+    const footY = wy + otter.h;
+
+    // Contact shadow on the ground.
+    if (otter.grounded) {
+      ctx.save();
+      ctx.globalAlpha = 0.18;
+      ctx.fillStyle = "#000";
+      ctx.beginPath();
+      ctx.ellipse(cx, footY + 2, otter.w * 0.55, 7, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    const dispH = 76; // world units — a touch taller than the hitbox, for presence
+    const dispW = dispH * (img.width / img.height);
+    const ls = otter.landAnim;
+    let rot, sx, sy, dy;
+    if (airborne) {
+      rot = clamp(-otter.vy * 0.00035, -0.18, 0.22); // lean back rising, forward falling
+      sx = 0.95; sy = 1.08;                          // slight stretch in the air
+      dy = 0;
+    } else {
+      rot = Math.sin(t) * 0.05;                      // gentle running sway
+      dy = -Math.abs(Math.sin(t)) * 3;               // little hop each stride
+      sx = 1 + 0.22 * ls;                            // squash on landing
+      sy = 1 - 0.20 * ls;
+    }
+
+    ctx.save();
+    ctx.translate(cx, footY + dy);
+    ctx.rotate(rot);
+    ctx.scale(sx, sy);
+    ctx.drawImage(img, -dispW / 2, -dispH, dispW, dispH); // bottom edge sits at the feet
+    ctx.restore();
+  }
+
   function drawParticles() {
     for (const p of particles) {
       const a = clamp(p.life / p.max, 0, 1);
@@ -1150,7 +1219,7 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
     drawGoal();
     drawParticles();
     // Otter (hidden on the title screen, where the mascot is shown instead).
-    if (state !== STATE.TITLE) drawOtter(otter.x, otter.y);
+    if (state !== STATE.TITLE) drawCharacter(otter.x, otter.y);
 
     // Water — screen space, drawn last so a falling otter sinks behind it.
     ctx.setTransform(scale, 0, 0, scale, shx * scale, shy * scale);
