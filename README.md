@@ -1,20 +1,24 @@
 # 🦦 Otter Jump
 
-A tiny Mario-style **auto-runner** built with plain HTML5 Canvas + vanilla JavaScript — no build step, no dependencies, one file.
+A Mario-style **auto-runner** built with plain HTML5 Canvas + vanilla JavaScript — no build step, no framework. Your character runs forward on its own; your only job is to **jump**: time it to clear gaps and grumpy sea-urchins, scoop up fish, and fetch the **shiny rock** at the end of each level. Levels are **endless and procedurally generated** (and provably solvable), with two modes, two difficulties, and a roster of hand-drawn characters to pick from.
 
-The otter runs forward on its own. Your only job is to **jump**: time it to clear gaps and grumpy sea-urchins, scoop up fish along the way, and reach the otter's prized **shiny rock** at the finish.
+## ▶ Play
 
-## Play
+**Live: https://jameson-m.github.io/otter-jump/**
 
-The game loads code as ES modules, so it needs to be **served over http** (not
-opened via `file://`). From the project folder:
+On an iPhone or iPad, open that link in Safari and tap **Share → Add to Home
+Screen** to install it as a full-screen app — it then works **offline**.
+
+### Run it locally
+
+The game loads ES modules + a service worker, so it must be **served over http**
+(not opened via `file://`):
 
 ```sh
 python3 -m http.server 4321   # then visit http://localhost:4321/index.html
 ```
 
-That URL also works for testing on a phone over your LAN, and is exactly how the
-deployed GitHub Pages version runs.
+That URL also works for testing on a phone over your LAN.
 
 ## Controls
 
