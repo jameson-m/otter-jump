@@ -388,7 +388,9 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
     Sound.win();
     const save = (k, v) => { try { localStorage.setItem(k, String(v)); } catch (e) {} };
     if (level > bestLevel) { bestLevel = level; save("otterjump.bestlevel", bestLevel); }
-    if (runCleared > bestRogue) { bestRogue = runCleared; save("otterjump.bestrogue", bestRogue); }
+    // Only true Roguelike runs (which reset to Level 1 on death) write the run best;
+    // otherwise Normal's unlimited retries would inflate it.
+    if (gameMode === "roguelike" && runCleared > bestRogue) { bestRogue = runCleared; save("otterjump.bestrogue", bestRogue); }
     if (score > best) { best = score; save("otterjump.best", best); }
     spawnParticles(GOAL.x, GOAL.y - 90, 80, {
       speedMin: 120, speedMax: 520, life: 1.6, size: 8, lift: 360,
