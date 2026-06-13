@@ -1169,7 +1169,7 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
     const bw = (colW - gap) / 2;
     const bh = clamp(cssH * 0.06, 40, 52);
     const playH = clamp(cssH * 0.078, 48, 62);
-    const previewH = clamp(cssH * 0.13, 78, 120);
+    const previewH = clamp(cssH * 0.14, 56, 118); // smaller on short (landscape) screens
 
     const blockH = 52 + previewH + 24 + (20 + bh) * 2 + 12 + playH + 26;
     let y = clamp((cssH - blockH) / 2, insets.top + 8, cssH);
@@ -1200,7 +1200,7 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
     y += bh + 12;
 
     menuButton("▶  PLAY", x0, y, colW, playH, false, () => startGame(), { primary: true, big: true });
-    y += playH + 20;
+    y += playH + 16;
 
     const b = getBest(gameMode, difficulty);
     const lbl = gameMode === "roguelike"
