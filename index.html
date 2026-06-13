@@ -9,6 +9,11 @@
   html, body {
     margin: 0;
     padding: 0;
+    /* position:fixed + inset:0 avoids iOS 100vh / URL-bar layout jumps and
+       rubber-band scrolling, and keeps the canvas truly full-screen. */
+    position: fixed;
+    inset: 0;
+    width: 100%;
     height: 100%;
     background: #0a1a2a;
     overflow: hidden;
@@ -16,15 +21,17 @@
     -webkit-user-select: none;
     user-select: none;
     -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
     touch-action: none;
     overscroll-behavior: none;
   }
   #game {
     display: block;
-    width: 100vw;
-    height: 100vh;
-    /* Crisp pixel-ish edges when scaled up */
-    image-rendering: auto;
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
   }
 </style>
 </head>
@@ -40,10 +47,9 @@
   // sea-urchins, scoop up fish, and reach the otter's favorite shiny rock.
   // ----------------------------------------------------------------------------
 
-  // Logical render resolution. Everything is drawn in this coordinate space and
-  // scaled (with letterboxing) to fit the device viewport.
-  const W = 1280;
-  const H = 720;
+  // The world is described in fixed "world units"; a camera (set up further down)
+  // maps a window of those units onto the device screen and fills it — portrait
+  // phone, landscape tablet, or desktop — with no letterboxing.
 
   // --- Physics tuning (pixels & seconds). These constants own the "game feel". ---
   const RUN_SPEED   = 300;   // constant horizontal auto-run speed
@@ -94,6 +100,7 @@
   const GOAL = { x: 4200, y: GROUND };
 
   const WORLD_W = 4400; // for camera clamping
+  const SOLID   = 1000; // how far a platform's solid body extends below its top
 
   // ----------------------------------------------------------------------------
   // Tiny procedural sound effects via WebAudio (no asset files).
@@ -138,37 +145,78 @@
   })();
 
   // ----------------------------------------------------------------------------
-  // Canvas / DPR / letterbox scaling
+  // Canvas, camera & responsive scaling
+  //
+  // The camera shows a window of the world that always fills the screen. We
+  // guarantee a minimum visible WIDTH (forward look-ahead, the gameplay-critical
+  // axis) and HEIGHT (enough to see jump apexes), so the game stays fair from a
+  // tall portrait iPhone to a wide desktop. The waterline is pinned to the bottom
+  // edge, so in portrait the extra vertical space becomes sky above the action.
   // ----------------------------------------------------------------------------
+  const VIEW_W_MIN   = 480;   // min world units visible horizontally (look-ahead)
+  const VIEW_H_MIN   = 760;   // min world units visible vertically (jump apexes)
+  const VIEW_BOTTOM  = 726;   // world-y pinned to the bottom edge of the screen
+  const WATER_Y      = 648;   // world-y of the water surface
+  const OTTER_ANCHOR = 0.30;  // otter rides this fraction from the left of the view
+
   const canvas = document.getElementById("game");
   const ctx = canvas.getContext("2d");
-  let viewScale = 1, viewOffX = 0, viewOffY = 0;
+
+  let dpr = 1, cssW = 1, cssH = 1;            // viewport, CSS px
+  let scale = 1;                              // device px per world unit
+  let viewW = VIEW_W_MIN, viewH = VIEW_H_MIN; // visible world units
+  let camX = 0, camY = 0;                     // world coords at the view's top-left
+  let skyGradient, waterGradient;
+  const insets = { top: 0, right: 0, bottom: 0, left: 0 }; // iOS safe-area, CSS px
+
+  // Hidden probe whose padding resolves the safe-area-inset env() values so we
+  // can keep the HUD/menus clear of the notch, Dynamic Island and home indicator.
+  const insetProbe = document.createElement("div");
+  insetProbe.style.cssText =
+    "position:fixed;top:0;left:0;width:0;height:0;visibility:hidden;pointer-events:none;" +
+    "padding:env(safe-area-inset-top) env(safe-area-inset-right) " +
+    "env(safe-area-inset-bottom) env(safe-area-inset-left);";
+  document.body.appendChild(insetProbe);
+  function readInsets() {
+    const s = getComputedStyle(insetProbe);
+    insets.top    = parseFloat(s.paddingTop)    || 0;
+    insets.right  = parseFloat(s.paddingRight)  || 0;
+    insets.bottom = parseFloat(s.paddingBottom) || 0;
+    insets.left   = parseFloat(s.paddingLeft)   || 0;
+  }
 
   function resize() {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const cw = Math.floor(window.innerWidth * dpr);
-    const ch = Math.floor(window.innerHeight * dpr);
+    dpr  = Math.min(window.devicePixelRatio || 1, 3);
+    cssW = Math.max(1, window.innerWidth);
+    cssH = Math.max(1, window.innerHeight);
+    const cw = Math.round(cssW * dpr), ch = Math.round(cssH * dpr);
     canvas.width = cw;
     canvas.height = ch;
-    canvas.style.width = window.innerWidth + "px";
-    canvas.style.height = window.innerHeight + "px";
-    viewScale = Math.min(cw / W, ch / H);
-    viewOffX = (cw - W * viewScale) / 2;
-    viewOffY = (ch - H * viewScale) / 2;
+    canvas.style.width = cssW + "px";
+    canvas.style.height = cssH + "px";
+
+    // Fill the screen while guaranteeing the minimum visible world window.
+    scale = Math.min(cw / VIEW_W_MIN, ch / VIEW_H_MIN);
+    viewW = cw / scale;
+    viewH = ch / scale;
+    camY  = VIEW_BOTTOM - viewH; // pin the waterline to the bottom of the screen
+
+    readInsets();
+
+    // (Re)build the gradients in screen space (top..bottom of the visible area),
+    // rebuilt on resize since the visible height changes with the viewport.
+    skyGradient = ctx.createLinearGradient(0, 0, 0, WATER_Y - camY);
+    skyGradient.addColorStop(0,   "#6fc0ec");
+    skyGradient.addColorStop(0.6, "#a3daf4");
+    skyGradient.addColorStop(1,   "#e3f4fc");
+    waterGradient = ctx.createLinearGradient(0, WATER_Y - camY, 0, viewH);
+    waterGradient.addColorStop(0, "#3fb4d8");
+    waterGradient.addColorStop(1, "#1f6f96");
   }
   window.addEventListener("resize", resize);
+  window.addEventListener("orientationchange", resize);
+  if (window.visualViewport) window.visualViewport.addEventListener("resize", resize);
   resize();
-
-  // Static gradients — the logical space is a fixed W×H, so these never change.
-  // Build them once and reuse each frame (the world transform handles scaling)
-  // instead of re-allocating a CanvasGradient on every render.
-  const skyGradient = ctx.createLinearGradient(0, 0, 0, H);
-  skyGradient.addColorStop(0, "#7ec8f0");
-  skyGradient.addColorStop(0.55, "#b7e3f7");
-  skyGradient.addColorStop(1, "#e9f7ff");
-  const waterGradient = ctx.createLinearGradient(0, 660, 0, H);
-  waterGradient.addColorStop(0, "#3fb4d8");
-  waterGradient.addColorStop(1, "#1f6f96");
 
   // ----------------------------------------------------------------------------
   // Game state
@@ -185,7 +233,6 @@
     vy: 0, grounded: true, coyote: 0, runAnim: 0, jumpPose: 0, face: 1,
   };
 
-  let camX = 0;
   let score = 0;
   let bufferTimer = 0;   // jump-buffer countdown
   let jumpHeld = false;
@@ -373,7 +420,7 @@
     for (const p of PLATFORMS) {
       // Use prevY for the vertical span so that landing onto a higher ledge
       // (where we're descending from above) isn't misread as a wall hit.
-      if (overlaps(otter.x, prevY, otter.w, otter.h, p.x, p.y, p.w, H)) {
+      if (overlaps(otter.x, prevY, otter.w, otter.h, p.x, p.y, p.w, SOLID)) {
         die();
         return;
       }
@@ -430,7 +477,7 @@
 
     // --- Animation + camera ---
     otter.runAnim += dt * (otter.grounded ? 12 : 4);
-    camX = Math.max(0, Math.min(WORLD_W - W, otter.x - 380));
+    camX = clamp(otter.x + otter.w / 2 - viewW * OTTER_ANCHOR, 0, Math.max(0, WORLD_W - viewW));
   }
 
   // ----------------------------------------------------------------------------
@@ -438,32 +485,35 @@
   // ----------------------------------------------------------------------------
   function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
 
+  // The background is drawn in *screen space* (origin at the view's top-left,
+  // spanning 0..viewW × 0..viewH world units) with parallax derived from camX.
   function drawBackground() {
-    // Sky gradient (cached).
+    // Sky fills the whole visible area.
     ctx.fillStyle = skyGradient;
-    ctx.fillRect(0, 0, W, H);
+    ctx.fillRect(-8, -8, viewW + 16, viewH + 16);
 
-    // Sun.
+    // Sun — parked near the top of the view (effectively infinitely far).
+    const sunX = viewW * 0.80, sunY = viewH * 0.15;
     ctx.save();
     ctx.globalAlpha = 0.9;
     ctx.fillStyle = "#fff4c2";
-    ctx.beginPath(); ctx.arc(W - 180, 130, 70, 0, Math.PI * 2); ctx.fill();
-    ctx.globalAlpha = 0.25;
-    ctx.beginPath(); ctx.arc(W - 180, 130, 100, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(sunX, sunY, 56, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 0.22;
+    ctx.beginPath(); ctx.arc(sunX, sunY, 88, 0, Math.PI * 2); ctx.fill();
     ctx.restore();
 
-    // Parallax clouds.
+    // Parallax clouds, tiled across a span a little wider than the view.
     ctx.fillStyle = "rgba(255,255,255,0.85)";
-    for (let i = 0; i < 6; i++) {
-      const cx = ((i * 360 - camX * 0.2 + elapsed * 12) % (W + 300) + (W + 300)) % (W + 300) - 150;
-      const cy = 90 + (i % 3) * 60;
-      cloud(cx, cy, 0.8 + (i % 3) * 0.25);
+    const span = viewW + 280;
+    for (let i = 0; i < 7; i++) {
+      const x = (((i * 250 - camX * 0.25 + elapsed * 10) % span) + span) % span - 140;
+      const y = viewH * 0.08 + (i % 3) * (viewH * 0.06) + 24;
+      cloud(x, y, 0.85 + (i % 3) * 0.22);
     }
 
-    // Far hills (slow parallax).
-    drawHills(camX * 0.25, 430, "#bfe3c8", 220, 360);
-    // Near hills (faster).
-    drawHills(camX * 0.5, 500, "#9bd6ab", 160, 280);
+    // Rolling hills (two parallax layers), anchored just behind the waterline.
+    drawHills(0.28, 560, "#bfe3c8", 190, 360);
+    drawHills(0.48, 606, "#9bd6ab", 150, 280);
   }
 
   function cloud(x, y, s) {
@@ -479,50 +529,58 @@
     ctx.restore();
   }
 
-  function drawHills(off, baseY, color, h, spacing) {
+  // par = parallax factor (0 fixed to screen .. 1 moves with the world).
+  function drawHills(par, baseWorldY, color, h, spacing) {
+    const baseY = baseWorldY - camY;   // screen-space baseline
+    const bottom = viewH + 6;
+    const phase = (((camX * par) % spacing) + spacing) % spacing;
     ctx.fillStyle = color;
     ctx.beginPath();
-    ctx.moveTo(0, H);
-    const start = -((off % spacing) + spacing) % spacing;
-    for (let x = start; x <= W + spacing; x += spacing) {
+    ctx.moveTo(-spacing * 2, bottom);
+    let x = -spacing - phase;
+    ctx.lineTo(x, baseY);
+    for (; x <= viewW + spacing; x += spacing) {
       ctx.quadraticCurveTo(x + spacing / 2, baseY - h, x + spacing, baseY);
     }
-    ctx.lineTo(W, H);
+    ctx.lineTo(viewW + spacing * 2, bottom);
     ctx.closePath();
     ctx.fill();
   }
 
+  // Water is drawn in screen space too, and rendered *after* the foreground so a
+  // falling otter sinks behind the surface.
   function drawWater() {
-    const waterTop = 660;
+    const top = WATER_Y - camY;        // screen-space y of the water surface
+    const bottom = viewH + 6;
     ctx.fillStyle = waterGradient;
     ctx.beginPath();
-    ctx.moveTo(0, H);
-    ctx.lineTo(0, waterTop);
-    for (let x = 0; x <= W; x += 20) {
-      const y = waterTop + Math.sin((x + camX * 0.5) * 0.02 + elapsed * 2) * 6;
+    ctx.moveTo(-6, bottom);
+    ctx.lineTo(-6, top);
+    for (let x = 0; x <= viewW; x += 22) {
+      const y = top + Math.sin((x + camX * 0.5) * 0.02 + elapsed * 2) * 6;
       ctx.lineTo(x, y);
     }
-    ctx.lineTo(W, H);
+    ctx.lineTo(viewW + 6, top);
+    ctx.lineTo(viewW + 6, bottom);
     ctx.closePath();
     ctx.fill();
 
-    // Sparkle glints. Wrap over a slightly-wider-than-screen span (with margin)
-    // so a glint slides fully off one edge before reappearing on the other,
-    // rather than popping at the play-area seam.
+    // Sparkle glints. Wrap over a slightly-wider-than-view span (with margin) so
+    // a glint slides fully off one edge before reappearing on the other.
     ctx.fillStyle = "rgba(255,255,255,0.5)";
-    const span = W + 40;
-    for (let i = 0; i < 14; i++) {
-      const x = ((i * 130 - camX * 0.5) % span + span) % span - 20;
-      const y = waterTop + 20 + (i % 4) * 12 + Math.sin(elapsed * 3 + i) * 3;
+    const span = viewW + 40;
+    for (let i = 0; i < 16; i++) {
+      const x = (((i * 120 - camX * 0.5) % span) + span) % span - 20;
+      const y = top + 18 + (i % 4) * 12 + Math.sin(elapsed * 3 + i) * 3;
       ctx.fillRect(x, y, 10, 2);
     }
   }
 
   function drawPlatform(p) {
-    const x = p.x - camX;
-    if (x > W + 40 || x + p.w < -40) return;
+    if (p.x > camX + viewW + 40 || p.x + p.w < camX - 40) return;
+    const x = p.x;
     const top = p.y;
-    const bottom = 680; // visually rest the dirt on the waterline
+    const bottom = VIEW_BOTTOM + 80; // extend the dirt below the screen / waterline
 
     // Dirt body.
     ctx.fillStyle = "#7a5230";
@@ -557,8 +615,8 @@
   }
 
   function drawUrchin(u) {
-    const x = u.x - camX, y = u.y - URCHIN_R;
-    if (x > W + 60 || x < -60) return;
+    if (u.x > camX + viewW + 60 || u.x < camX - 60) return;
+    const x = u.x, y = u.y - URCHIN_R;
     ctx.save();
     ctx.translate(x, y);
     ctx.fillStyle = "#5b2c83";
@@ -584,8 +642,8 @@
 
   function drawFish(f) {
     if (f.got) return;
-    const x = f.x - camX;
-    if (x > W + 40 || x < -40) return;
+    if (f.x > camX + viewW + 40 || f.x < camX - 40) return;
+    const x = f.x;
     const y = f.y + Math.sin(elapsed * 3 + f.x) * 6;
     ctx.save();
     ctx.translate(x, y);
@@ -612,8 +670,8 @@
   }
 
   function drawGoal() {
-    const x = GOAL.x - camX;
-    if (x > W + 120 || x < -120) return;
+    if (GOAL.x > camX + viewW + 160 || GOAL.x < camX - 160) return;
+    const x = GOAL.x;
     const baseY = GOAL.y;
     // pedestal
     ctx.fillStyle = "#caa24a";
@@ -816,109 +874,123 @@
       ctx.globalAlpha = a;
       ctx.fillStyle = p.color;
       if (p.shape === "rect") {
-        ctx.fillRect(p.x - camX - p.size / 2, p.y - p.size / 2, p.size, p.size);
+        ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
       } else {
         ctx.beginPath();
-        ctx.arc(p.x - camX, p.y, p.size, 0, Math.PI * 2);
+        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
         ctx.fill();
       }
     }
     ctx.globalAlpha = 1;
   }
 
-  // --- HUD & overlays (drawn in screen space, not affected by camera) ---
+  // --- HUD & overlays (CSS-px screen space, kept clear of the safe area) ---
   function drawHUD() {
-    // Fish counter
+    const left = insets.left + 14;
+    const right = cssW - insets.right - 14;
+    const top = insets.top + 12;
+    const bw = Math.max(40, right - left);
+
+    // Progress bar across the top.
+    const prog = clamp((otter.x - 90) / (GOAL.x - 90), 0, 1);
+    ctx.fillStyle = "rgba(255,255,255,0.45)";
+    roundRectPath(left, top, bw, 8, 4); ctx.fill();
+    ctx.fillStyle = "#2f9e57";
+    roundRectPath(left, top, bw * prog, 8, 4); ctx.fill();
+    ctx.fillStyle = "#7f8da0";
+    ctx.beginPath(); ctx.arc(left + bw, top + 4, 7, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#8a5a36";
+    ctx.beginPath(); ctx.arc(left + bw * prog, top + 4, 6, 0, Math.PI * 2); ctx.fill();
+
+    // Fish counter just below the bar.
+    const cy = top + 30;
     ctx.save();
-    ctx.translate(36, 40);
+    ctx.translate(left + 11, cy);
     ctx.fillStyle = "#ff9b3d";
-    ctx.beginPath(); ctx.ellipse(0, 0, 14, 9, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.beginPath(); ctx.moveTo(11, 0); ctx.lineTo(20, -7); ctx.lineTo(20, 7); ctx.closePath(); ctx.fill();
-    ctx.fillStyle = "#1a1a1a"; ctx.beginPath(); ctx.arc(-6, -2, 1.6, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(0, 0, 12, 8, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(9, 0); ctx.lineTo(17, -6); ctx.lineTo(17, 6); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#1a1a1a"; ctx.beginPath(); ctx.arc(-5, -2, 1.4, 0, Math.PI * 2); ctx.fill();
     ctx.restore();
     ctx.fillStyle = "#0d2a3a";
-    ctx.font = "bold 30px system-ui, sans-serif";
+    ctx.font = "bold 20px system-ui, sans-serif";
     ctx.textBaseline = "middle";
     ctx.textAlign = "left";
-    ctx.fillText("× " + score + " / " + FISH.length, 62, 41);
-
-    // Progress bar
-    const prog = clamp((otter.x - 90) / (GOAL.x - 90), 0, 1);
-    const bw = 360, bx = W - bw - 36, by = 32;
-    ctx.fillStyle = "rgba(255,255,255,0.5)";
-    roundRectPath(bx, by, bw, 14, 7); ctx.fill();
-    ctx.fillStyle = "#2f9e57";
-    roundRectPath(bx, by, bw * prog, 14, 7); ctx.fill();
-    // rock marker at end
-    ctx.fillStyle = "#7f8da0";
-    ctx.beginPath(); ctx.arc(bx + bw, by + 7, 11, 0, Math.PI * 2); ctx.fill();
-    // otter marker
-    ctx.fillStyle = "#8a5a36";
-    ctx.beginPath(); ctx.arc(bx + bw * prog, by + 7, 9, 0, Math.PI * 2); ctx.fill();
+    ctx.fillText(score + " / " + FISH.length, left + 30, cy);
 
     if (Sound.isMuted()) {
       ctx.fillStyle = "rgba(13,42,58,0.6)";
-      ctx.font = "16px system-ui, sans-serif";
+      ctx.font = "14px system-ui, sans-serif";
       ctx.textAlign = "right";
-      ctx.fillText("muted (M)", W - 36, 64);
+      ctx.fillText("muted (M)", right, cy);
     }
   }
 
   function overlayPanel() {
-    ctx.fillStyle = "rgba(8,24,38,0.45)";
-    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "rgba(8,24,38,0.5)";
+    ctx.fillRect(0, 0, cssW, cssH);
   }
 
-  function centerText(text, y, size, color, weight) {
+  // Centered text that auto-shrinks to fit the available width (narrow phones).
+  function centerText(text, y, size, color, weight, maxW) {
+    weight = weight || "bold";
+    let s = size;
+    ctx.font = weight + " " + s + "px system-ui, sans-serif";
+    if (maxW) {
+      while (s > 9 && ctx.measureText(text).width > maxW) {
+        s -= 1;
+        ctx.font = weight + " " + s + "px system-ui, sans-serif";
+      }
+    }
     ctx.fillStyle = color;
-    ctx.font = (weight || "bold") + " " + size + "px system-ui, sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText(text, W / 2, y);
+    ctx.fillText(text, cssW / 2, y);
   }
 
   function pulseHint(text, y) {
     const a = 0.6 + Math.sin(elapsed * 4) * 0.4;
     ctx.globalAlpha = a;
-    centerText(text, y, 30, "#ffffff", "bold");
+    centerText(text, y, 26, "#ffffff", "bold", cssW - 48);
     ctx.globalAlpha = 1;
   }
 
   function drawTitle() {
     overlayPanel();
-    // big otter mascot
+    const cy = cssH / 2;
+    const maxW = cssW - 48;
+    // Mascot above the title.
     ctx.save();
-    ctx.translate(W / 2 - 250, H / 2 - 30);
-    ctx.scale(2.4, 2.4);
+    ctx.translate(cssW / 2, cy - 150);
+    const ms = clamp(Math.min(cssW / 240, cssH / 520), 1.4, 3.0);
+    ctx.scale(ms, ms);
     drawOtterStatic();
     ctx.restore();
 
-    centerText("OTTER JUMP", H / 2 - 120, 84, "#ffe6a3", "900");
-    centerText("Run, jump, and fetch your favorite shiny rock!", H / 2 - 56, 28, "#dff3ff", "600");
-    ctx.fillStyle = "#bfe6ff";
-    ctx.font = "22px system-ui, sans-serif";
-    ctx.textAlign = "center";
-    ctx.fillText("The otter runs on its own — you only jump.", W / 2 + 130, H / 2 + 30);
-    ctx.fillText("Space / Click / Tap  =  Jump   (hold for higher)", W / 2 + 130, H / 2 + 64);
-    pulseHint("Press Space or Tap to start", H / 2 + 140);
-    if (best > 0) centerText("Best catch: " + best + " fish", H / 2 + 190, 22, "#9ed0ff", "600");
+    centerText("OTTER JUMP", cy - 78, 58, "#ffe6a3", "900", maxW);
+    centerText("Fetch your favorite shiny rock!", cy - 36, 20, "#dff3ff", "700", maxW);
+    centerText("The otter runs on its own — you only jump.", cy + 16, 17, "#bfe6ff", "600", maxW);
+    centerText("Tap (or press Space) to jump — hold for higher.", cy + 42, 17, "#bfe6ff", "600", maxW);
+    pulseHint("Tap to start", cy + 110);
+    if (best > 0) centerText("Best catch: " + best + " fish", cy + 152, 16, "#9ed0ff", "600", maxW);
   }
 
   function drawDead() {
     overlayPanel();
-    centerText("SPLASH!", H / 2 - 70, 76, "#aef0ff", "900");
-    centerText("Fish collected: " + score, H / 2, 30, "#dff3ff", "600");
-    pulseHint("Press Space or Tap to try again", H / 2 + 80);
+    const cy = cssH / 2, maxW = cssW - 48;
+    centerText("SPLASH!", cy - 50, 66, "#aef0ff", "900", maxW);
+    centerText("Fish collected: " + score, cy + 4, 22, "#dff3ff", "600", maxW);
+    pulseHint("Tap to try again", cy + 70);
   }
 
   function drawWon() {
     overlayPanel();
-    centerText("YOU GOT THE SHINY ROCK!", H / 2 - 90, 60, "#ffe6a3", "900");
-    centerText("A happy otter indeed.", H / 2 - 36, 28, "#dff3ff", "600");
-    centerText("Fish collected: " + score + " / " + FISH.length, H / 2 + 24, 34, "#ffffff", "bold");
-    if (score === FISH.length) centerText("Perfect run! ★", H / 2 + 70, 28, "#9cff8a", "700");
-    else if (score >= best && best > 0) centerText("New best!", H / 2 + 70, 26, "#9ed0ff", "700");
-    pulseHint("Press Space or Tap to play again", H / 2 + 140);
+    const cy = cssH / 2, maxW = cssW - 48;
+    centerText("YOU GOT THE SHINY ROCK!", cy - 70, 40, "#ffe6a3", "900", maxW);
+    centerText("A happy otter indeed.", cy - 30, 20, "#dff3ff", "600", maxW);
+    centerText("Fish: " + score + " / " + FISH.length, cy + 14, 26, "#ffffff", "bold", maxW);
+    if (score === FISH.length) centerText("Perfect run! ★", cy + 50, 20, "#9cff8a", "700", maxW);
+    else if (score >= best && best > 0) centerText("New best!", cy + 50, 20, "#9ed0ff", "700", maxW);
+    pulseHint("Tap to play again", cy + 110);
   }
 
   // A static otter pose for the title screen.
@@ -936,43 +1008,39 @@
   // Render frame
   // ----------------------------------------------------------------------------
   function render() {
-    // Clear full device buffer (letterbox bars).
+    const cw = canvas.width, ch = canvas.height;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = "#0a1a2a";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillRect(0, 0, cw, ch);
 
-    // World transform (+ screen shake).
-    const sx = shake > 0 ? (Math.sin(elapsed * 80) * shake) : 0;
-    const sy = shake > 0 ? (Math.cos(elapsed * 73) * shake) : 0;
-    ctx.setTransform(viewScale, 0, 0, viewScale, viewOffX + sx * viewScale, viewOffY + sy * viewScale);
+    // Screen shake (world units).
+    const shx = shake > 0 ? Math.sin(elapsed * 80) * shake : 0;
+    const shy = shake > 0 ? Math.cos(elapsed * 73) * shake : 0;
 
-    // Clip to the logical play area so nothing spills into the letterbox.
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, 0, W, H);
-    ctx.clip();
-
+    // Background — screen space (scale only); parallax comes from camX.
+    ctx.setTransform(scale, 0, 0, scale, shx * scale, shy * scale);
     drawBackground();
+
+    // Foreground — full world transform (camera applied).
+    ctx.setTransform(scale, 0, 0, scale, (-camX + shx) * scale, (-camY + shy) * scale);
     PLATFORMS.forEach(drawPlatform);
     FISH.forEach(drawFish);
     URCHINS.forEach(drawUrchin);
     drawGoal();
     drawParticles();
-
     // Otter (hidden on the title screen, where the mascot is shown instead).
-    if (state !== STATE.TITLE) {
-      drawOtter(otter.x - camX, otter.y);
-    }
+    if (state !== STATE.TITLE) drawOtter(otter.x, otter.y);
 
+    // Water — screen space, drawn last so a falling otter sinks behind it.
+    ctx.setTransform(scale, 0, 0, scale, shx * scale, shy * scale);
     drawWater();
 
+    // UI — CSS px.
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     if (state === STATE.PLAYING || state === STATE.WON) drawHUD();
-
     if (state === STATE.TITLE) drawTitle();
     else if (state === STATE.DEAD) drawDead();
     else if (state === STATE.WON) drawWon();
-
-    ctx.restore();
   }
 
   // ----------------------------------------------------------------------------
