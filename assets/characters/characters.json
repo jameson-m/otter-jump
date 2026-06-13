@@ -1,0 +1,10 @@
+{
+  "_comment": "Playable hand-drawn characters. Order matches the source PDF. Sprites are transparent PNGs in this folder. Per-character in-game scale/offset tuning is added when sprite rendering is wired up.",
+  "characters": [
+    { "id": "one",         "name": "One",         "file": "one.png" },
+    { "id": "silly-bunny", "name": "Silly Bunny", "file": "silly-bunny.png" },
+    { "id": "teddy",       "name": "Teddy",       "file": "teddy.png" },
+    { "id": "zoomy",       "name": "Zoomy",       "file": "zoomy.png" },
+    { "id": "kiwi",        "name": "Kiwi",        "file": "kiwi.png" }
+  ]
+}
