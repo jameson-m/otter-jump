@@ -477,7 +477,10 @@
 
     // --- Animation + camera ---
     otter.runAnim += dt * (otter.grounded ? 12 : 4);
-    camX = clamp(otter.x + otter.w / 2 - viewW * OTTER_ANCHOR, 0, Math.max(0, WORLD_W - viewW));
+    const maxCam = WORLD_W - viewW;
+    camX = maxCam <= 0
+      ? maxCam / 2 // view wider than the whole world (ultra-wide): center it
+      : clamp(otter.x + otter.w / 2 - viewW * OTTER_ANCHOR, 0, maxCam);
   }
 
   // ----------------------------------------------------------------------------
