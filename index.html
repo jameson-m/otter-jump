@@ -1,0 +1,1002 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<meta name="theme-color" content="#0a1a2a" />
+<title>Otter Jump</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #0a1a2a;
+    overflow: hidden;
+    /* No selection / callouts / scroll-bounce on touch */
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+    touch-action: none;
+    overscroll-behavior: none;
+  }
+  #game {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    /* Crisp pixel-ish edges when scaled up */
+    image-rendering: auto;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+"use strict";
+(() => {
+  // ----------------------------------------------------------------------------
+  // Otter Jump — an auto-running platformer.
+  // The otter runs to the right on its own; the only control is JUMP
+  // (Space / ArrowUp / W / click / tap). Time your jumps to clear gaps and
+  // sea-urchins, scoop up fish, and reach the otter's favorite shiny rock.
+  // ----------------------------------------------------------------------------
+
+  // Logical render resolution. Everything is drawn in this coordinate space and
+  // scaled (with letterboxing) to fit the device viewport.
+  const W = 1280;
+  const H = 720;
+
+  // --- Physics tuning (pixels & seconds). These constants own the "game feel". ---
+  const RUN_SPEED   = 300;   // constant horizontal auto-run speed
+  const GRAVITY     = 2200;  // downward acceleration
+  const JUMP_V      = 860;   // initial upward jump velocity
+  const JUMP_CUT    = 0.5;   // velocity kept when jump released early (variable height)
+  const COYOTE_TIME = 0.10;  // grace period to jump just after leaving a ledge
+  const JUMP_BUFFER = 0.13;  // grace period to register a jump pressed just before landing
+  const MAX_FALL    = 1300;  // terminal velocity
+  const DEATH_Y     = 820;   // fall below this and it's a splash
+
+  // --- World geometry ---
+  const GROUND = 580; // top surface of ground-level platforms
+  const MID    = 490;
+  const HIGH   = 410;
+
+  // Each platform is a solid block from its top surface (y) downward.
+  const PLATFORMS = [
+    { x: 0,    y: GROUND, w: 720 }, // start (with tutorial urchin)
+    { x: 870,  y: GROUND, w: 320 },
+    { x: 1310, y: MID,    w: 240 },
+    { x: 1710, y: MID,    w: 220 },
+    { x: 2080, y: GROUND, w: 360 },
+    { x: 2570, y: 500,    w: 200 },
+    { x: 2890, y: HIGH,   w: 200 },
+    { x: 3240, y: 500,    w: 240 },
+    { x: 3640, y: GROUND, w: 700 }, // finish stretch (urchin + shiny rock)
+  ];
+
+  // Spiky sea-urchins sit on top of a platform; touching one is fatal.
+  const URCHIN_R = 22;
+  const URCHINS = [
+    { x: 520,  y: GROUND }, // early "you must jump" moment
+    { x: 4020, y: GROUND }, // last hurdle before the reward
+  ];
+
+  // Fish are optional collectibles for score; many float over gaps at jump height.
+  const FISH = [
+    { x: 320,  y: 510 }, { x: 790,  y: 470 }, { x: 960,  y: 480 },
+    { x: 1080, y: 515 }, { x: 1250, y: 430 }, { x: 1430, y: 420 },
+    { x: 1630, y: 420 }, { x: 1810, y: 420 }, { x: 2010, y: 470 },
+    { x: 2260, y: 510 }, { x: 2490, y: 440 }, { x: 2810, y: 350 },
+    { x: 2990, y: 340 }, { x: 3160, y: 420 }, { x: 3360, y: 430 },
+    { x: 3560, y: 470 }, { x: 3800, y: 515 },
+  ];
+
+  // The goal: the otter's prized shiny rock on a little pedestal.
+  const GOAL = { x: 4200, y: GROUND };
+
+  const WORLD_W = 4400; // for camera clamping
+
+  // ----------------------------------------------------------------------------
+  // Tiny procedural sound effects via WebAudio (no asset files).
+  // ----------------------------------------------------------------------------
+  const Sound = (() => {
+    let ctx = null;
+    let muted = false;
+    function ensure() {
+      if (!ctx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (AC) ctx = new AC();
+      }
+      if (ctx && ctx.state === "suspended") ctx.resume();
+      return ctx;
+    }
+    function tone(freqStart, freqEnd, dur, type, vol) {
+      const c = ensure();
+      if (!c || muted) return;
+      const t0 = c.currentTime;
+      const osc = c.createOscillator();
+      const gain = c.createGain();
+      osc.type = type || "square";
+      osc.frequency.setValueAtTime(freqStart, t0);
+      osc.frequency.exponentialRampToValueAtTime(Math.max(1, freqEnd), t0 + dur);
+      gain.gain.setValueAtTime(0.0001, t0);
+      gain.gain.exponentialRampToValueAtTime(vol, t0 + 0.012);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      osc.connect(gain).connect(c.destination);
+      osc.start(t0);
+      osc.stop(t0 + dur + 0.02);
+    }
+    return {
+      unlock: ensure,
+      jump:    () => tone(380, 720, 0.14, "square",   0.16),
+      land:    () => tone(220, 130, 0.09, "sine",     0.12),
+      collect: () => { tone(660, 660, 0.07, "triangle", 0.14); setTimeout(() => tone(990, 990, 0.09, "triangle", 0.14), 70); },
+      die:     () => tone(440, 90,  0.45, "sawtooth", 0.18),
+      win:     () => { [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => tone(f, f, 0.16, "triangle", 0.16), i * 110)); },
+      toggleMute: () => { muted = !muted; return muted; },
+      isMuted: () => muted,
+    };
+  })();
+
+  // ----------------------------------------------------------------------------
+  // Canvas / DPR / letterbox scaling
+  // ----------------------------------------------------------------------------
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+  let viewScale = 1, viewOffX = 0, viewOffY = 0;
+
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const cw = Math.floor(window.innerWidth * dpr);
+    const ch = Math.floor(window.innerHeight * dpr);
+    canvas.width = cw;
+    canvas.height = ch;
+    canvas.style.width = window.innerWidth + "px";
+    canvas.style.height = window.innerHeight + "px";
+    viewScale = Math.min(cw / W, ch / H);
+    viewOffX = (cw - W * viewScale) / 2;
+    viewOffY = (ch - H * viewScale) / 2;
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  // Static gradients — the logical space is a fixed W×H, so these never change.
+  // Build them once and reuse each frame (the world transform handles scaling)
+  // instead of re-allocating a CanvasGradient on every render.
+  const skyGradient = ctx.createLinearGradient(0, 0, 0, H);
+  skyGradient.addColorStop(0, "#7ec8f0");
+  skyGradient.addColorStop(0.55, "#b7e3f7");
+  skyGradient.addColorStop(1, "#e9f7ff");
+  const waterGradient = ctx.createLinearGradient(0, 660, 0, H);
+  waterGradient.addColorStop(0, "#3fb4d8");
+  waterGradient.addColorStop(1, "#1f6f96");
+
+  // ----------------------------------------------------------------------------
+  // Game state
+  // ----------------------------------------------------------------------------
+  const STATE = { TITLE: 0, PLAYING: 1, DEAD: 2, WON: 3 };
+  let state = STATE.TITLE;
+  let inputLock = 0;     // brief lock after a state change so one press isn't reused
+  let shake = 0;         // screen-shake magnitude
+  let best = 0;
+  try { best = parseInt(localStorage.getItem("otterjump.best") || "0", 10) || 0; } catch (e) {}
+
+  const otter = {
+    x: 90, y: GROUND - 44, w: 50, h: 44,
+    vy: 0, grounded: true, coyote: 0, runAnim: 0, jumpPose: 0, face: 1,
+  };
+
+  let camX = 0;
+  let score = 0;
+  let bufferTimer = 0;   // jump-buffer countdown
+  let jumpHeld = false;
+  let particles = [];
+  let elapsed = 0;       // total time, for animations
+  let winTimer = 0;
+
+  function resetRun() {
+    otter.x = 90;
+    otter.y = GROUND - otter.h;
+    otter.vy = 0;
+    otter.grounded = true;
+    otter.coyote = 0;
+    otter.runAnim = 0;
+    otter.jumpPose = 0;
+    camX = 0;
+    score = 0;
+    bufferTimer = 0;
+    shake = 0;
+    winTimer = 0;
+    particles = [];
+    FISH.forEach(f => (f.got = false));
+  }
+
+  // ----------------------------------------------------------------------------
+  // Particles
+  // ----------------------------------------------------------------------------
+  function spawnParticles(x, y, count, conf) {
+    for (let i = 0; i < count; i++) {
+      const a = conf.angle != null ? conf.angle + (Math.random() - 0.5) * conf.spread : Math.random() * Math.PI * 2;
+      const sp = conf.speedMin + Math.random() * (conf.speedMax - conf.speedMin);
+      particles.push({
+        x, y,
+        vx: Math.cos(a) * sp,
+        vy: Math.sin(a) * sp - (conf.lift || 0),
+        life: conf.life * (0.7 + Math.random() * 0.6),
+        max: conf.life,
+        size: conf.size * (0.6 + Math.random() * 0.8),
+        grav: conf.grav != null ? conf.grav : 1400,
+        color: Array.isArray(conf.color) ? conf.color[(Math.random() * conf.color.length) | 0] : conf.color,
+        shape: conf.shape || "circle",
+      });
+    }
+  }
+  function updateParticles(dt) {
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.life -= dt;
+      if (p.life <= 0) { particles.splice(i, 1); continue; }
+      p.vy += p.grav * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+    }
+  }
+
+  // ----------------------------------------------------------------------------
+  // Input
+  // ----------------------------------------------------------------------------
+  function pressJump() {
+    Sound.unlock();
+    if (inputLock > 0) return;
+    if (state === STATE.TITLE) { resetRun(); state = STATE.PLAYING; inputLock = 0.15; return; }
+    if (state === STATE.DEAD)  { resetRun(); state = STATE.PLAYING; inputLock = 0.15; return; }
+    if (state === STATE.WON)   { resetRun(); state = STATE.PLAYING; inputLock = 0.15; return; }
+    // PLAYING: buffer the jump; the physics step decides if it can fire.
+    bufferTimer = JUMP_BUFFER;
+    jumpHeld = true;
+  }
+  function releaseJump() {
+    jumpHeld = false;
+    // Variable jump height: cut the rise short if released while ascending.
+    if (state === STATE.PLAYING && otter.vy < 0) otter.vy *= JUMP_CUT;
+  }
+
+  window.addEventListener("keydown", (e) => {
+    if (e.code === "Space" || e.code === "ArrowUp" || e.code === "KeyW") {
+      e.preventDefault();
+      if (!e.repeat) pressJump();
+    } else if (e.code === "KeyM") {
+      Sound.toggleMute();
+    }
+  }, { passive: false });
+  window.addEventListener("keyup", (e) => {
+    if (e.code === "Space" || e.code === "ArrowUp" || e.code === "KeyW") releaseJump();
+  });
+
+  // Pointer events cover mouse, touch and pen without double-firing.
+  canvas.addEventListener("pointerdown", (e) => { e.preventDefault(); pressJump(); }, { passive: false });
+  window.addEventListener("pointerup", () => releaseJump());
+  window.addEventListener("contextmenu", (e) => e.preventDefault());
+  // Avoid the page scrolling/zooming on touch.
+  document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+
+  // ----------------------------------------------------------------------------
+  // Collision helpers
+  // ----------------------------------------------------------------------------
+  function overlaps(ax, ay, aw, ah, bx, by, bw, bh) {
+    return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+  }
+
+  function die() {
+    if (state !== STATE.PLAYING) return;
+    state = STATE.DEAD;
+    inputLock = 0.5;
+    shake = 16;
+    Sound.die();
+    spawnParticles(otter.x + otter.w / 2, otter.y + otter.h / 2, 26, {
+      speedMin: 120, speedMax: 460, life: 0.9, size: 7, lift: 240,
+      color: ["#bfe9ff", "#7fd0ff", "#ffffff", "#aee4ff"], grav: 1500,
+    });
+  }
+
+  function win() {
+    if (state !== STATE.PLAYING) return;
+    state = STATE.WON;
+    inputLock = 0.6;
+    winTimer = 0;
+    Sound.win();
+    if (score > best) { best = score; try { localStorage.setItem("otterjump.best", String(best)); } catch (e) {} }
+    spawnParticles(GOAL.x, GOAL.y - 90, 80, {
+      speedMin: 120, speedMax: 520, life: 1.6, size: 8, lift: 360,
+      color: ["#ffd54a", "#ff7eb6", "#7be0ff", "#9cff8a", "#ffffff", "#c79bff"],
+      grav: 900, shape: "rect",
+    });
+  }
+
+  // ----------------------------------------------------------------------------
+  // Update
+  // ----------------------------------------------------------------------------
+  function update(dt) {
+    elapsed += dt;
+    if (inputLock > 0) inputLock = Math.max(0, inputLock - dt);
+    updateParticles(dt);
+    if (shake > 0) shake = Math.max(0, shake - dt * 40);
+
+    if (state === STATE.WON) {
+      winTimer += dt;
+      // little victory hop in place
+      otter.vy += GRAVITY * dt;
+      otter.y += otter.vy * dt;
+      if (otter.y >= GOAL.y - otter.h) {
+        otter.y = GOAL.y - otter.h;
+        if (winTimer % 0.7 < dt && otter.vy >= 0) otter.vy = -480;
+        else otter.vy = 0;
+      }
+      return;
+    }
+    if (state !== STATE.PLAYING) {
+      // idle bob on title/dead screens for a touch of life
+      otter.runAnim += dt * 6;
+      return;
+    }
+
+    // --- Auto-run ---
+    const prevX = otter.x, prevY = otter.y;
+    const prevBottom = prevY + otter.h;
+    otter.x += RUN_SPEED * dt;
+
+    // Update coyote/buffer timers.
+    if (otter.grounded) otter.coyote = COYOTE_TIME;
+    else otter.coyote = Math.max(0, otter.coyote - dt);
+    if (bufferTimer > 0) bufferTimer = Math.max(0, bufferTimer - dt);
+
+    // Fire a jump if buffered and we're on (or just left) the ground.
+    if (bufferTimer > 0 && otter.coyote > 0) {
+      otter.vy = -JUMP_V;
+      otter.grounded = false;
+      otter.coyote = 0;
+      bufferTimer = 0;
+      otter.jumpPose = 1;
+      Sound.jump();
+      spawnParticles(otter.x + 8, otter.y + otter.h, 8, {
+        angle: Math.PI / 2, spread: 1.6, speedMin: 60, speedMax: 200,
+        life: 0.35, size: 5, color: ["#d8c39a", "#c2a877", "#e7d8b5"], grav: 900,
+      });
+    }
+
+    // --- Gravity / vertical integration ---
+    otter.vy = Math.min(MAX_FALL, otter.vy + GRAVITY * dt);
+    otter.y += otter.vy * dt;
+
+    // --- Horizontal collisions (running into a wall = crash) ---
+    // Check against the position the otter currently occupies; an overlap here
+    // means we ran our body into the side of a higher platform.
+    for (const p of PLATFORMS) {
+      // Use prevY for the vertical span so that landing onto a higher ledge
+      // (where we're descending from above) isn't misread as a wall hit.
+      if (overlaps(otter.x, prevY, otter.w, otter.h, p.x, p.y, p.w, H)) {
+        die();
+        return;
+      }
+    }
+
+    // --- Vertical collisions (land on tops) ---
+    otter.grounded = false;
+    for (const p of PLATFORMS) {
+      if (otter.x + otter.w <= p.x || otter.x >= p.x + p.w) continue; // not horizontally over it
+      const top = p.y;
+      if (otter.vy >= 0 && prevBottom <= top + 1 && otter.y + otter.h >= top) {
+        otter.y = top - otter.h;
+        otter.vy = 0;
+        if (!otter.grounded && otter.jumpPose > 0) {
+          Sound.land();
+          spawnParticles(otter.x + otter.w / 2, otter.y + otter.h, 6, {
+            angle: Math.PI / 2, spread: 1.8, speedMin: 40, speedMax: 150,
+            life: 0.28, size: 4, color: ["#d8c39a", "#c2a877"], grav: 800,
+          });
+        }
+        otter.grounded = true;
+        otter.jumpPose = 0;
+      }
+    }
+
+    // --- Urchins (touch = death) ---
+    for (const u of URCHINS) {
+      const ux = u.x - URCHIN_R, uy = u.y - URCHIN_R * 2;
+      if (overlaps(otter.x + 6, otter.y + 6, otter.w - 12, otter.h - 8, ux, uy, URCHIN_R * 2, URCHIN_R * 2)) {
+        die();
+        return;
+      }
+    }
+
+    // --- Fish pickups ---
+    for (const f of FISH) {
+      if (f.got) continue;
+      if (overlaps(otter.x, otter.y, otter.w, otter.h, f.x - 22, f.y - 16, 44, 32)) {
+        f.got = true;
+        score++;
+        Sound.collect();
+        spawnParticles(f.x, f.y, 12, {
+          speedMin: 60, speedMax: 240, life: 0.5, size: 5, lift: 80,
+          color: ["#ffd54a", "#ffffff", "#ffb347"], grav: 700,
+        });
+      }
+    }
+
+    // --- Goal ---
+    if (otter.x + otter.w * 0.5 >= GOAL.x) { win(); }
+
+    // --- Fell into the water ---
+    if (otter.y > DEATH_Y) { die(); return; }
+
+    // --- Animation + camera ---
+    otter.runAnim += dt * (otter.grounded ? 12 : 4);
+    camX = Math.max(0, Math.min(WORLD_W - W, otter.x - 380));
+  }
+
+  // ----------------------------------------------------------------------------
+  // Rendering
+  // ----------------------------------------------------------------------------
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+
+  function drawBackground() {
+    // Sky gradient (cached).
+    ctx.fillStyle = skyGradient;
+    ctx.fillRect(0, 0, W, H);
+
+    // Sun.
+    ctx.save();
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = "#fff4c2";
+    ctx.beginPath(); ctx.arc(W - 180, 130, 70, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 0.25;
+    ctx.beginPath(); ctx.arc(W - 180, 130, 100, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+
+    // Parallax clouds.
+    ctx.fillStyle = "rgba(255,255,255,0.85)";
+    for (let i = 0; i < 6; i++) {
+      const cx = ((i * 360 - camX * 0.2 + elapsed * 12) % (W + 300) + (W + 300)) % (W + 300) - 150;
+      const cy = 90 + (i % 3) * 60;
+      cloud(cx, cy, 0.8 + (i % 3) * 0.25);
+    }
+
+    // Far hills (slow parallax).
+    drawHills(camX * 0.25, 430, "#bfe3c8", 220, 360);
+    // Near hills (faster).
+    drawHills(camX * 0.5, 500, "#9bd6ab", 160, 280);
+  }
+
+  function cloud(x, y, s) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(s, s);
+    ctx.beginPath();
+    ctx.arc(0, 0, 34, 0, Math.PI * 2);
+    ctx.arc(40, 8, 28, 0, Math.PI * 2);
+    ctx.arc(-38, 10, 26, 0, Math.PI * 2);
+    ctx.arc(6, 20, 30, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawHills(off, baseY, color, h, spacing) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    const start = -((off % spacing) + spacing) % spacing;
+    for (let x = start; x <= W + spacing; x += spacing) {
+      ctx.quadraticCurveTo(x + spacing / 2, baseY - h, x + spacing, baseY);
+    }
+    ctx.lineTo(W, H);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawWater() {
+    const waterTop = 660;
+    ctx.fillStyle = waterGradient;
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    ctx.lineTo(0, waterTop);
+    for (let x = 0; x <= W; x += 20) {
+      const y = waterTop + Math.sin((x + camX * 0.5) * 0.02 + elapsed * 2) * 6;
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(W, H);
+    ctx.closePath();
+    ctx.fill();
+
+    // Sparkle glints. Wrap over a slightly-wider-than-screen span (with margin)
+    // so a glint slides fully off one edge before reappearing on the other,
+    // rather than popping at the play-area seam.
+    ctx.fillStyle = "rgba(255,255,255,0.5)";
+    const span = W + 40;
+    for (let i = 0; i < 14; i++) {
+      const x = ((i * 130 - camX * 0.5) % span + span) % span - 20;
+      const y = waterTop + 20 + (i % 4) * 12 + Math.sin(elapsed * 3 + i) * 3;
+      ctx.fillRect(x, y, 10, 2);
+    }
+  }
+
+  function drawPlatform(p) {
+    const x = p.x - camX;
+    if (x > W + 40 || x + p.w < -40) return;
+    const top = p.y;
+    const bottom = 680; // visually rest the dirt on the waterline
+
+    // Dirt body.
+    ctx.fillStyle = "#7a5230";
+    roundRectPath(x, top, p.w, bottom - top, 12);
+    ctx.fill();
+    // Grass cap.
+    ctx.fillStyle = "#5fbf63";
+    roundRectPath(x, top, p.w, 22, 12);
+    ctx.fill();
+    ctx.fillStyle = "#4ea552";
+    ctx.fillRect(x + 8, top + 18, p.w - 16, 5);
+    // Little grass tufts.
+    ctx.fillStyle = "#6fd17a";
+    for (let gx = x + 16; gx < x + p.w - 10; gx += 46) {
+      ctx.beginPath();
+      ctx.moveTo(gx, top);
+      ctx.lineTo(gx + 5, top - 12);
+      ctx.lineTo(gx + 10, top);
+      ctx.fill();
+    }
+  }
+
+  function roundRectPath(x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function drawUrchin(u) {
+    const x = u.x - camX, y = u.y - URCHIN_R;
+    if (x > W + 60 || x < -60) return;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.fillStyle = "#5b2c83";
+    ctx.strokeStyle = "#3f1d5e";
+    ctx.lineWidth = 4;
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI * 2 + Math.sin(elapsed * 2) * 0.05;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(Math.cos(a) * (URCHIN_R + 12), Math.sin(a) * (URCHIN_R + 12));
+      ctx.stroke();
+    }
+    ctx.beginPath(); ctx.arc(0, 0, URCHIN_R, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#7b46a6";
+    ctx.beginPath(); ctx.arc(-5, -5, URCHIN_R * 0.5, 0, Math.PI * 2); ctx.fill();
+    // grumpy eyes
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(-6, -2, 4, 0, Math.PI * 2); ctx.arc(7, -2, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#1a1a1a";
+    ctx.beginPath(); ctx.arc(-6, -1, 2, 0, Math.PI * 2); ctx.arc(7, -1, 2, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+
+  function drawFish(f) {
+    if (f.got) return;
+    const x = f.x - camX;
+    if (x > W + 40 || x < -40) return;
+    const y = f.y + Math.sin(elapsed * 3 + f.x) * 6;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.fillStyle = "#ff9b3d";
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 18, 11, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // tail
+    ctx.beginPath();
+    ctx.moveTo(14, 0);
+    ctx.lineTo(26, -10);
+    ctx.lineTo(26, 10);
+    ctx.closePath();
+    ctx.fill();
+    // belly highlight
+    ctx.fillStyle = "#ffd29a";
+    ctx.beginPath(); ctx.ellipse(-2, 3, 11, 5, 0, 0, Math.PI * 2); ctx.fill();
+    // eye
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(-9, -2, 3.5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#1a1a1a";
+    ctx.beginPath(); ctx.arc(-9, -2, 1.8, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+
+  function drawGoal() {
+    const x = GOAL.x - camX;
+    if (x > W + 120 || x < -120) return;
+    const baseY = GOAL.y;
+    // pedestal
+    ctx.fillStyle = "#caa24a";
+    roundRectPath(x - 46, baseY - 30, 92, 30, 8);
+    ctx.fill();
+    ctx.fillStyle = "#e3c873";
+    ctx.fillRect(x - 40, baseY - 30, 80, 8);
+
+    // glow
+    const pulse = 0.5 + Math.sin(elapsed * 3) * 0.2;
+    ctx.save();
+    ctx.globalAlpha = 0.35 * pulse + 0.2;
+    const rg = ctx.createRadialGradient(x, baseY - 70, 6, x, baseY - 70, 80);
+    rg.addColorStop(0, "#ffffff");
+    rg.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = rg;
+    ctx.beginPath(); ctx.arc(x, baseY - 70, 80, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+
+    // the shiny rock — bobbing a little
+    const ry = baseY - 60 + Math.sin(elapsed * 2) * 4;
+    ctx.save();
+    ctx.translate(x, ry);
+    const grad = ctx.createLinearGradient(0, -28, 0, 24);
+    grad.addColorStop(0, "#cfd9e6");
+    grad.addColorStop(0.5, "#9aa7ba");
+    grad.addColorStop(1, "#6f7c90");
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(-30, 10);
+    ctx.quadraticCurveTo(-34, -18, -6, -24);
+    ctx.quadraticCurveTo(26, -28, 32, -2);
+    ctx.quadraticCurveTo(34, 18, 8, 22);
+    ctx.quadraticCurveTo(-22, 24, -30, 10);
+    ctx.closePath();
+    ctx.fill();
+    // facets
+    ctx.fillStyle = "rgba(255,255,255,0.35)";
+    ctx.beginPath();
+    ctx.moveTo(-6, -20); ctx.lineTo(10, -8); ctx.lineTo(-2, 2); ctx.closePath(); ctx.fill();
+    // sparkles
+    sparkle(14, -16, 6 + Math.sin(elapsed * 5) * 2);
+    sparkle(-14, -6, 4 + Math.cos(elapsed * 4) * 2);
+    sparkle(6, 12, 5 + Math.sin(elapsed * 6 + 1) * 2);
+    ctx.restore();
+  }
+
+  function sparkle(x, y, r) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath();
+    ctx.moveTo(0, -r); ctx.lineTo(r * 0.25, -r * 0.25);
+    ctx.lineTo(r, 0); ctx.lineTo(r * 0.25, r * 0.25);
+    ctx.lineTo(0, r); ctx.lineTo(-r * 0.25, r * 0.25);
+    ctx.lineTo(-r, 0); ctx.lineTo(-r * 0.25, -r * 0.25);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawOtter(screenX, screenY) {
+    const t = otter.runAnim;
+    const airborne = !otter.grounded && state === STATE.PLAYING;
+    const bob = otter.grounded ? Math.sin(t * 2) * 2 : 0;
+    const cx = screenX + otter.w / 2;
+    const cy = screenY + otter.h / 2 + bob;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+
+    // shadow on ground
+    if (otter.grounded) {
+      ctx.save();
+      ctx.globalAlpha = 0.18;
+      ctx.fillStyle = "#000";
+      ctx.beginPath();
+      ctx.ellipse(0, otter.h / 2 + 4, otter.w * 0.5, 7, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    const brown = "#8a5a36";
+    const brownDark = "#6f4628";
+    const belly = "#d8b489";
+
+    // tail (sways)
+    const tailSway = Math.sin(t * 2) * 0.3 + (airborne ? -0.4 : 0);
+    ctx.save();
+    ctx.rotate(tailSway);
+    ctx.fillStyle = brownDark;
+    ctx.beginPath();
+    ctx.moveTo(-otter.w * 0.42, 6);
+    ctx.quadraticCurveTo(-otter.w * 0.95, 2, -otter.w * 0.9, 20);
+    ctx.quadraticCurveTo(-otter.w * 0.55, 18, -otter.w * 0.34, 12);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+
+    // back legs (running cycle)
+    const legA = airborne ? -0.5 : Math.sin(t) * 0.5;
+    const legB = airborne ? 0.6 : Math.sin(t + Math.PI) * 0.5;
+    ctx.fillStyle = brownDark;
+    foot(-6, otter.h * 0.32, legA);
+    foot(10, otter.h * 0.32, legB);
+
+    // body
+    ctx.fillStyle = brown;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, otter.w * 0.42, otter.h * 0.46, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // belly
+    ctx.fillStyle = belly;
+    ctx.beginPath();
+    ctx.ellipse(2, 6, otter.w * 0.26, otter.h * 0.32, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // front arms (reach forward while running, up while jumping)
+    ctx.fillStyle = brown;
+    if (airborne) {
+      arm(otter.w * 0.28, -6, -0.9);
+      arm(otter.w * 0.18, -8, -1.2);
+    } else {
+      arm(otter.w * 0.3, 4, Math.sin(t + 1) * 0.5 + 0.2);
+    }
+
+    // head
+    const hx = otter.w * 0.34, hy = -otter.h * 0.34;
+    ctx.fillStyle = brown;
+    ctx.beginPath();
+    ctx.arc(hx, hy, otter.h * 0.34, 0, Math.PI * 2);
+    ctx.fill();
+    // ears
+    ctx.beginPath();
+    ctx.arc(hx - 8, hy - 12, 6, 0, Math.PI * 2);
+    ctx.arc(hx + 9, hy - 12, 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = brownDark;
+    ctx.beginPath();
+    ctx.arc(hx - 8, hy - 12, 3, 0, Math.PI * 2);
+    ctx.arc(hx + 9, hy - 12, 3, 0, Math.PI * 2);
+    ctx.fill();
+    // muzzle
+    ctx.fillStyle = belly;
+    ctx.beginPath();
+    ctx.ellipse(hx + 6, hy + 7, 11, 9, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // nose
+    ctx.fillStyle = "#3a2418";
+    ctx.beginPath();
+    ctx.ellipse(hx + 11, hy + 3, 4, 3, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // eyes
+    ctx.fillStyle = "#1a1a1a";
+    const blink = (Math.sin(elapsed * 1.3) > 0.97) ? 0.2 : 1;
+    ctx.save();
+    ctx.translate(hx + 2, hy - 4);
+    ctx.scale(1, blink);
+    ctx.beginPath(); ctx.arc(0, 0, 3.2, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(13, 0, 3.2, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(hx + 3.2, hy - 5, 1.1, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(hx + 16.2, hy - 5, 1.1, 0, Math.PI * 2); ctx.fill();
+    // whiskers
+    ctx.strokeStyle = "rgba(80,55,35,0.7)";
+    ctx.lineWidth = 1.2;
+    for (let i = -1; i <= 1; i++) {
+      ctx.beginPath();
+      ctx.moveTo(hx + 12, hy + 6 + i * 2);
+      ctx.lineTo(hx + 28, hy + 3 + i * 5);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+
+    function foot(ox, oy, ang) {
+      ctx.save();
+      ctx.translate(ox, oy);
+      ctx.rotate(ang);
+      ctx.beginPath();
+      ctx.ellipse(0, 8, 7, 10, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+    function arm(ox, oy, ang) {
+      ctx.save();
+      ctx.translate(ox, oy);
+      ctx.rotate(ang);
+      ctx.beginPath();
+      ctx.ellipse(6, 0, 10, 6, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  function drawParticles() {
+    for (const p of particles) {
+      const a = clamp(p.life / p.max, 0, 1);
+      ctx.globalAlpha = a;
+      ctx.fillStyle = p.color;
+      if (p.shape === "rect") {
+        ctx.fillRect(p.x - camX - p.size / 2, p.y - p.size / 2, p.size, p.size);
+      } else {
+        ctx.beginPath();
+        ctx.arc(p.x - camX, p.y, p.size, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // --- HUD & overlays (drawn in screen space, not affected by camera) ---
+  function drawHUD() {
+    // Fish counter
+    ctx.save();
+    ctx.translate(36, 40);
+    ctx.fillStyle = "#ff9b3d";
+    ctx.beginPath(); ctx.ellipse(0, 0, 14, 9, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(11, 0); ctx.lineTo(20, -7); ctx.lineTo(20, 7); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#1a1a1a"; ctx.beginPath(); ctx.arc(-6, -2, 1.6, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+    ctx.fillStyle = "#0d2a3a";
+    ctx.font = "bold 30px system-ui, sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "left";
+    ctx.fillText("× " + score + " / " + FISH.length, 62, 41);
+
+    // Progress bar
+    const prog = clamp((otter.x - 90) / (GOAL.x - 90), 0, 1);
+    const bw = 360, bx = W - bw - 36, by = 32;
+    ctx.fillStyle = "rgba(255,255,255,0.5)";
+    roundRectPath(bx, by, bw, 14, 7); ctx.fill();
+    ctx.fillStyle = "#2f9e57";
+    roundRectPath(bx, by, bw * prog, 14, 7); ctx.fill();
+    // rock marker at end
+    ctx.fillStyle = "#7f8da0";
+    ctx.beginPath(); ctx.arc(bx + bw, by + 7, 11, 0, Math.PI * 2); ctx.fill();
+    // otter marker
+    ctx.fillStyle = "#8a5a36";
+    ctx.beginPath(); ctx.arc(bx + bw * prog, by + 7, 9, 0, Math.PI * 2); ctx.fill();
+
+    if (Sound.isMuted()) {
+      ctx.fillStyle = "rgba(13,42,58,0.6)";
+      ctx.font = "16px system-ui, sans-serif";
+      ctx.textAlign = "right";
+      ctx.fillText("muted (M)", W - 36, 64);
+    }
+  }
+
+  function overlayPanel() {
+    ctx.fillStyle = "rgba(8,24,38,0.45)";
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  function centerText(text, y, size, color, weight) {
+    ctx.fillStyle = color;
+    ctx.font = (weight || "bold") + " " + size + "px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, W / 2, y);
+  }
+
+  function pulseHint(text, y) {
+    const a = 0.6 + Math.sin(elapsed * 4) * 0.4;
+    ctx.globalAlpha = a;
+    centerText(text, y, 30, "#ffffff", "bold");
+    ctx.globalAlpha = 1;
+  }
+
+  function drawTitle() {
+    overlayPanel();
+    // big otter mascot
+    ctx.save();
+    ctx.translate(W / 2 - 250, H / 2 - 30);
+    ctx.scale(2.4, 2.4);
+    drawOtterStatic();
+    ctx.restore();
+
+    centerText("OTTER JUMP", H / 2 - 120, 84, "#ffe6a3", "900");
+    centerText("Run, jump, and fetch your favorite shiny rock!", H / 2 - 56, 28, "#dff3ff", "600");
+    ctx.fillStyle = "#bfe6ff";
+    ctx.font = "22px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("The otter runs on its own — you only jump.", W / 2 + 130, H / 2 + 30);
+    ctx.fillText("Space / Click / Tap  =  Jump   (hold for higher)", W / 2 + 130, H / 2 + 64);
+    pulseHint("Press Space or Tap to start", H / 2 + 140);
+    if (best > 0) centerText("Best catch: " + best + " fish", H / 2 + 190, 22, "#9ed0ff", "600");
+  }
+
+  function drawDead() {
+    overlayPanel();
+    centerText("SPLASH!", H / 2 - 70, 76, "#aef0ff", "900");
+    centerText("Fish collected: " + score, H / 2, 30, "#dff3ff", "600");
+    pulseHint("Press Space or Tap to try again", H / 2 + 80);
+  }
+
+  function drawWon() {
+    overlayPanel();
+    centerText("YOU GOT THE SHINY ROCK!", H / 2 - 90, 60, "#ffe6a3", "900");
+    centerText("A happy otter indeed.", H / 2 - 36, 28, "#dff3ff", "600");
+    centerText("Fish collected: " + score + " / " + FISH.length, H / 2 + 24, 34, "#ffffff", "bold");
+    if (score === FISH.length) centerText("Perfect run! ★", H / 2 + 70, 28, "#9cff8a", "700");
+    else if (score >= best && best > 0) centerText("New best!", H / 2 + 70, 26, "#9ed0ff", "700");
+    pulseHint("Press Space or Tap to play again", H / 2 + 140);
+  }
+
+  // A static otter pose for the title screen.
+  function drawOtterStatic() {
+    const saveAnim = otter.runAnim, saveG = otter.grounded;
+    otter.runAnim = 0; otter.grounded = true;
+    ctx.save();
+    ctx.translate(0, Math.sin(elapsed * 2) * 4);
+    drawOtter(-otter.w / 2, -otter.h / 2);
+    ctx.restore();
+    otter.runAnim = saveAnim; otter.grounded = saveG;
+  }
+
+  // ----------------------------------------------------------------------------
+  // Render frame
+  // ----------------------------------------------------------------------------
+  function render() {
+    // Clear full device buffer (letterbox bars).
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = "#0a1a2a";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // World transform (+ screen shake).
+    const sx = shake > 0 ? (Math.sin(elapsed * 80) * shake) : 0;
+    const sy = shake > 0 ? (Math.cos(elapsed * 73) * shake) : 0;
+    ctx.setTransform(viewScale, 0, 0, viewScale, viewOffX + sx * viewScale, viewOffY + sy * viewScale);
+
+    // Clip to the logical play area so nothing spills into the letterbox.
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, W, H);
+    ctx.clip();
+
+    drawBackground();
+    PLATFORMS.forEach(drawPlatform);
+    FISH.forEach(drawFish);
+    URCHINS.forEach(drawUrchin);
+    drawGoal();
+    drawParticles();
+
+    // Otter (hidden on the title screen, where the mascot is shown instead).
+    if (state !== STATE.TITLE) {
+      drawOtter(otter.x - camX, otter.y);
+    }
+
+    drawWater();
+
+    if (state === STATE.PLAYING || state === STATE.WON) drawHUD();
+
+    if (state === STATE.TITLE) drawTitle();
+    else if (state === STATE.DEAD) drawDead();
+    else if (state === STATE.WON) drawWon();
+
+    ctx.restore();
+  }
+
+  // ----------------------------------------------------------------------------
+  // Main loop — fixed-timestep physics for consistent feel.
+  // ----------------------------------------------------------------------------
+  const STEP = 1 / 120;
+  let acc = 0;
+  let last = 0;
+
+  function frame(now) {
+    if (!last) last = now;
+    let delta = (now - last) / 1000;
+    last = now;
+    if (delta > 0.25) delta = 0.25; // avoid spiral-of-death after a tab switch
+    acc += delta;
+    while (acc >= STEP) {
+      update(STEP);
+      acc -= STEP;
+    }
+    render();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

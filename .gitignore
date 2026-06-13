@@ -1,0 +1,12 @@
+# Claude Code working dir (worktrees, local preview config, etc.)
+.claude/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Node (only used for local tooling/tests, never shipped)
+node_modules/
+npm-debug.log*
