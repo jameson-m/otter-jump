@@ -214,17 +214,27 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
   let inputLock = 0;     // brief lock after a state change so one press isn't reused
   let shake = 0;         // screen-shake magnitude
   let level = 1;             // current level number
-  let difficulty = "kid";    // "kid" | "normal" — selection UI arrives with the menu
+  let difficulty = "kid";    // "kid" | "normal"
   let gameMode = "normal";   // "normal" (forgiving) | "roguelike" (death -> level 1)
   let runCleared = 0;        // levels cleared in the current run (the roguelike score)
-  let best = 0;              // best fish caught in a single level (secondary)
-  let bestLevel = 0;         // highest level reached, Normal mode
-  let bestRogue = 0;         // most levels cleared in a single Roguelike run
-  try {
-    best = parseInt(localStorage.getItem("otterjump.best") || "0", 10) || 0;
-    bestLevel = parseInt(localStorage.getItem("otterjump.bestlevel") || "0", 10) || 0;
-    bestRogue = parseInt(localStorage.getItem("otterjump.bestrogue") || "0", 10) || 0;
-  } catch (e) {}
+  let menuButtons = [];      // active tappable UI regions for the current screen
+
+  const LS = {
+    get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : v; } catch (e) { return d; } },
+    set(k, v) { try { localStorage.setItem(k, String(v)); } catch (e) {} },
+  };
+  // Restore the last-used mode & difficulty.
+  difficulty = LS.get("otterjump.diff", "kid") === "normal" ? "normal" : "kid";
+  gameMode = LS.get("otterjump.mode", "normal") === "roguelike" ? "roguelike" : "normal";
+
+  // Best score is tracked per (mode × difficulty): highest level reached in Normal,
+  // best run length in Roguelike.
+  const bestKey = (mode, diff) => "otterjump.best." + mode + "." + diff;
+  const getBest = (mode, diff) => parseInt(LS.get(bestKey(mode, diff), "0"), 10) || 0;
+  function recordBest() {
+    const s = gameMode === "roguelike" ? runCleared : level;
+    if (s > getBest(gameMode, difficulty)) LS.set(bestKey(gameMode, difficulty), s);
+  }
 
   const otter = {
     x: startX, y: startTop - PHYS.OTTER_H, w: PHYS.OTTER_W, h: PHYS.OTTER_H,
@@ -317,6 +327,20 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
   // ----------------------------------------------------------------------------
   // Input
   // ----------------------------------------------------------------------------
+  function selectMode(m) { gameMode = m; LS.set("otterjump.mode", m); }
+  function selectDiff(d) { difficulty = d; LS.set("otterjump.diff", d); }
+  function goToMenu() { state = STATE.TITLE; inputLock = 0.2; }
+
+  // Hit-test the buttons the current screen registered this frame. Runs the first
+  // hit and returns true (so it isn't also treated as a jump).
+  function handleUiTap(x, y) {
+    if (inputLock > 0) return true; // swallow taps during the brief post-transition lock
+    for (const b of menuButtons) {
+      if (x >= b.x && y >= b.y && x <= b.x + b.w && y <= b.y + b.h) { b.action(); return true; }
+    }
+    return false;
+  }
+
   function pressJump() {
     Sound.unlock();
     if (inputLock > 0) return;
@@ -348,7 +372,13 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
   // Pointer events cover mouse, touch and pen without double-firing. The canvas
   // fills the screen, so a tap anywhere = jump. pointerup is bound to window so a
   // release that drifts off the canvas still registers.
-  canvas.addEventListener("pointerdown", (e) => { e.preventDefault(); pressJump(); }, { passive: false });
+  canvas.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    Sound.unlock();
+    if (handleUiTap(e.clientX, e.clientY)) return;  // a menu button was tapped
+    if (state === STATE.TITLE) return;              // on the menu only the buttons act
+    pressJump();
+  }, { passive: false });
   window.addEventListener("pointerup", releaseJump);
   window.addEventListener("pointercancel", releaseJump); // iOS may cancel instead of up
   window.addEventListener("contextmenu", (e) => e.preventDefault());
@@ -386,12 +416,7 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
     winTimer = 0;
     runCleared += 1; // a level was cleared this run
     Sound.win();
-    const save = (k, v) => { try { localStorage.setItem(k, String(v)); } catch (e) {} };
-    if (level > bestLevel) { bestLevel = level; save("otterjump.bestlevel", bestLevel); }
-    // Only true Roguelike runs (which reset to Level 1 on death) write the run best;
-    // otherwise Normal's unlimited retries would inflate it.
-    if (gameMode === "roguelike" && runCleared > bestRogue) { bestRogue = runCleared; save("otterjump.bestrogue", bestRogue); }
-    if (score > best) { best = score; save("otterjump.best", best); }
+    recordBest();
     spawnParticles(GOAL.x, GOAL.y - 90, 80, {
       speedMin: 120, speedMax: 520, life: 1.6, size: 8, lift: 360,
       color: ["#ffd54a", "#ff7eb6", "#7be0ff", "#9cff8a", "#ffffff", "#c79bff"],
@@ -961,11 +986,15 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
     ctx.textAlign = "left";
     ctx.fillText(score + " / " + FISH.length, left + 30, cy);
 
-    // Level indicator (top-center).
+    // Level indicator (top-center) with a tiny mode · difficulty subtitle.
     ctx.fillStyle = "#0d2a3a";
     ctx.font = "bold 18px system-ui, sans-serif";
     ctx.textAlign = "center";
-    ctx.fillText("Level " + level, cssW / 2, cy);
+    ctx.fillText("Level " + level, cssW / 2, cy - 5);
+    ctx.fillStyle = "rgba(13,42,58,0.6)";
+    ctx.font = "11px system-ui, sans-serif";
+    ctx.fillText((gameMode === "roguelike" ? "Roguelike" : "Normal") + " · " +
+                 (difficulty === "kid" ? "Kid" : "Normal"), cssW / 2, cy + 11);
 
     if (Sound.isMuted()) {
       ctx.fillStyle = "rgba(13,42,58,0.6)";
@@ -1004,63 +1033,96 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
     ctx.globalAlpha = 1;
   }
 
+  // Draws a rounded button and registers its tap region + action for this frame.
+  function menuButton(label, x, y, w, h, selected, action, opts) {
+    menuButtons.push({ x, y, w, h, action });
+    opts = opts || {};
+    const r = Math.min(14, h / 2);
+    ctx.fillStyle = opts.primary ? "#ffcf3f" : (selected ? "#ffd86b" : "rgba(255,255,255,0.14)");
+    roundRectPath(x, y, w, h, r); ctx.fill();
+    if (selected || opts.primary) {
+      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = opts.primary ? "#ffffff" : "#fff3c4";
+      roundRectPath(x + 1.5, y + 1.5, w - 3, h - 3, r); ctx.stroke();
+    }
+    ctx.fillStyle = (selected || opts.primary) ? "#3a2a0c" : "#eaf6ff";
+    ctx.font = "bold " + Math.round(h * (opts.big ? 0.42 : 0.36)) + "px system-ui, sans-serif";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(label, x + w / 2, y + h / 2 + 1);
+  }
+
+  // Small "back to menu" button near the bottom, used on the dead/cleared screens.
+  function menuLink() {
+    const w = 128, h = 42, x = cssW / 2 - w / 2, y = cssH - insets.bottom - h - 16;
+    menuButton("≡  Menu", x, y, w, h, false, () => goToMenu());
+  }
+
+  // The title screen is the start menu: pick mode + difficulty, then Play.
   function drawTitle() {
     overlayPanel();
-    const cy = cssH / 2;
-    const maxW = cssW - 48;
-    // Mascot above the title.
-    ctx.save();
-    ctx.translate(cssW / 2, cy - 150);
-    const ms = clamp(Math.min(cssW / 240, cssH / 520), 1.4, 3.0);
-    ctx.scale(ms, ms);
-    drawOtterStatic();
-    ctx.restore();
+    const cx = cssW / 2;
+    const colW = Math.min(cssW - 36, 420);
+    const x0 = cx - colW / 2;
+    const gap = 12;
+    const bw = (colW - gap) / 2;
+    const bh = clamp(cssH * 0.066, 42, 54);
+    const playH = clamp(cssH * 0.085, 50, 66);
 
-    centerText("OTTER JUMP", cy - 78, 58, "#ffe6a3", "900", maxW);
-    centerText("Fetch your favorite shiny rock!", cy - 36, 20, "#dff3ff", "700", maxW);
-    centerText("The otter runs on its own — you only jump.", cy + 16, 17, "#bfe6ff", "600", maxW);
-    centerText("Tap (or press Space) to jump — hold for higher.", cy + 42, 17, "#bfe6ff", "600", maxW);
-    pulseHint("Tap to start", cy + 110);
-    if (gameMode === "roguelike") {
-      if (bestRogue > 0) centerText("Best run: " + bestRogue + " levels", cy + 152, 16, "#9ed0ff", "600", maxW);
-    } else if (bestLevel > 0) {
-      centerText("Best: reached Level " + bestLevel, cy + 152, 16, "#9ed0ff", "600", maxW);
-    }
+    const blockH = 64 + 28 + (22 + bh) * 2 + 16 + playH + 30;
+    let y = clamp((cssH - blockH) / 2, insets.top + 12, cssH);
+
+    centerText("OTTER JUMP", y + 28, clamp(colW * 0.14, 34, 58), "#ffe6a3", "900", colW);
+    y += 64;
+    centerText("Run, jump, fetch the shiny rock!", y + 6, 17, "#dff3ff", "700", colW);
+    y += 28;
+
+    centerText("Mode", y + 12, 14, "#bfe6ff", "800", colW);
+    y += 22;
+    menuButton("Normal", x0, y, bw, bh, gameMode === "normal", () => selectMode("normal"));
+    menuButton("Roguelike", x0 + bw + gap, y, bw, bh, gameMode === "roguelike", () => selectMode("roguelike"));
+    y += bh + 12;
+
+    centerText("Difficulty", y + 12, 14, "#bfe6ff", "800", colW);
+    y += 22;
+    menuButton("Kid", x0, y, bw, bh, difficulty === "kid", () => selectDiff("kid"));
+    menuButton("Normal", x0 + bw + gap, y, bw, bh, difficulty === "normal", () => selectDiff("normal"));
+    y += bh + 16;
+
+    menuButton("▶  PLAY", x0, y, colW, playH, false, () => startGame(), { primary: true, big: true });
+    y += playH + 22;
+
+    const b = getBest(gameMode, difficulty);
+    const lbl = gameMode === "roguelike"
+      ? (b > 0 ? "Best run: " + b + (b === 1 ? " level" : " levels") : "Roguelike — one life, how far can you get?")
+      : (b > 0 ? "Best: reached Level " + b : "Normal — endless, retry any level");
+    centerText(lbl, y, 14, "#9ed0ff", "700", colW);
   }
 
   function drawDead() {
     overlayPanel();
     const cy = cssH / 2, maxW = cssW - 48;
-    centerText("SPLASH!", cy - 56, 66, "#aef0ff", "900", maxW);
+    centerText("SPLASH!", cy - 64, 64, "#aef0ff", "900", maxW);
     if (gameMode === "roguelike") {
-      centerText("Run over — you cleared " + runCleared + (runCleared === 1 ? " level" : " levels"), cy, 22, "#dff3ff", "700", maxW);
-      if (bestRogue > 0) centerText("Best run: " + bestRogue, cy + 32, 17, "#9ed0ff", "600", maxW);
-      pulseHint("Tap to start a new run", cy + 78);
+      centerText("Run over — you cleared " + runCleared + (runCleared === 1 ? " level" : " levels"), cy - 14, 21, "#dff3ff", "700", maxW);
+      const b = getBest("roguelike", difficulty);
+      if (b > 0) centerText("Best run: " + b, cy + 14, 16, "#9ed0ff", "600", maxW);
+      pulseHint("Tap to start a new run", cy + 56);
     } else {
-      centerText("Level " + level + " — fish caught: " + score, cy, 22, "#dff3ff", "600", maxW);
-      pulseHint("Tap to try again", cy + 64);
+      centerText("Level " + level + " — fish caught: " + score, cy - 14, 21, "#dff3ff", "600", maxW);
+      pulseHint("Tap to try again", cy + 44);
     }
+    menuLink();
   }
 
   function drawWon() {
     overlayPanel();
     const cy = cssH / 2, maxW = cssW - 48;
-    centerText("LEVEL " + level + " CLEARED!", cy - 64, 44, "#ffe6a3", "900", maxW);
-    centerText("You fetched the shiny rock!", cy - 24, 20, "#dff3ff", "700", maxW);
-    centerText("Fish: " + score + " / " + FISH.length, cy + 18, 24, "#ffffff", "bold", maxW);
-    if (FISH.length > 0 && score === FISH.length) centerText("Perfect! ★", cy + 52, 18, "#9cff8a", "700", maxW);
-    pulseHint("On to Level " + (level + 1) + " — tap!", cy + 108);
-  }
-
-  // A static otter pose for the title screen.
-  function drawOtterStatic() {
-    const saveAnim = otter.runAnim, saveG = otter.grounded;
-    otter.runAnim = 0; otter.grounded = true;
-    ctx.save();
-    ctx.translate(0, Math.sin(elapsed * 2) * 4);
-    drawOtter(-otter.w / 2, -otter.h / 2);
-    ctx.restore();
-    otter.runAnim = saveAnim; otter.grounded = saveG;
+    centerText("LEVEL " + level + " CLEARED!", cy - 70, 44, "#ffe6a3", "900", maxW);
+    centerText("You fetched the shiny rock!", cy - 30, 20, "#dff3ff", "700", maxW);
+    centerText("Fish: " + score + " / " + FISH.length, cy + 12, 24, "#ffffff", "bold", maxW);
+    if (FISH.length > 0 && score === FISH.length) centerText("Perfect! ★", cy + 46, 18, "#9cff8a", "700", maxW);
+    pulseHint("On to Level " + (level + 1) + " — tap!", cy + 100);
+    menuLink();
   }
 
   // ----------------------------------------------------------------------------
@@ -1094,8 +1156,9 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
     ctx.setTransform(scale, 0, 0, scale, shx * scale, shy * scale);
     drawWater();
 
-    // UI — CSS px.
+    // UI — CSS px. Buttons are re-registered each frame by the active screen.
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    menuButtons.length = 0;
     if (state === STATE.PLAYING || state === STATE.WON) drawHUD();
     if (state === STATE.TITLE) drawTitle();
     else if (state === STATE.DEAD) drawDead();
