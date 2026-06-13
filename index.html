@@ -213,8 +213,14 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
   let state = STATE.TITLE;
   let inputLock = 0;     // brief lock after a state change so one press isn't reused
   let shake = 0;         // screen-shake magnitude
-  let best = 0;
-  try { best = parseInt(localStorage.getItem("otterjump.best") || "0", 10) || 0; } catch (e) {}
+  let level = 1;             // current level number
+  let difficulty = "kid";    // "kid" | "normal" — selection UI arrives with the menu
+  let best = 0;              // best fish caught in a single level (secondary)
+  let bestLevel = 0;         // highest level reached (primary progression score)
+  try {
+    best = parseInt(localStorage.getItem("otterjump.best") || "0", 10) || 0;
+    bestLevel = parseInt(localStorage.getItem("otterjump.bestlevel") || "0", 10) || 0;
+  } catch (e) {}
 
   const otter = {
     x: startX, y: startTop - PHYS.OTTER_H, w: PHYS.OTTER_W, h: PHYS.OTTER_H,
@@ -243,6 +249,29 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
     winTimer = 0;
     particles = [];
     FISH.forEach(f => (f.got = false));
+  }
+
+  // Seconds the "level cleared" celebration holds before auto-advancing.
+  const CLEAR_HOLD = 1.8;
+
+  function startGame() {            // fresh game from the title
+    level = 1;
+    loadLevel(level, difficulty);
+    resetRun();
+    state = STATE.PLAYING;
+    inputLock = 0.15;
+  }
+  function advanceLevel() {         // on clearing a level
+    level += 1;
+    loadLevel(level, difficulty);
+    resetRun();
+    state = STATE.PLAYING;
+    inputLock = 0.15;
+  }
+  function retryLevel() {           // after a splash — forgiving replay of the same level
+    resetRun();                     // (mode-specific death behaviour arrives with game modes)
+    state = STATE.PLAYING;
+    inputLock = 0.15;
   }
 
   // ----------------------------------------------------------------------------
@@ -282,9 +311,9 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
   function pressJump() {
     Sound.unlock();
     if (inputLock > 0) return;
-    if (state === STATE.TITLE) { resetRun(); state = STATE.PLAYING; inputLock = 0.15; return; }
-    if (state === STATE.DEAD)  { resetRun(); state = STATE.PLAYING; inputLock = 0.15; return; }
-    if (state === STATE.WON)   { resetRun(); state = STATE.PLAYING; inputLock = 0.15; return; }
+    if (state === STATE.TITLE) { startGame(); return; }
+    if (state === STATE.DEAD)  { retryLevel(); return; }
+    if (state === STATE.WON)   { advanceLevel(); return; } // tap to skip the celebration
     // PLAYING: buffer the jump; the physics step decides if it can fire.
     bufferTimer = JUMP_BUFFER;
     jumpHeld = true;
@@ -347,6 +376,7 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
     inputLock = 0.6;
     winTimer = 0;
     Sound.win();
+    if (level > bestLevel) { bestLevel = level; try { localStorage.setItem("otterjump.bestlevel", String(bestLevel)); } catch (e) {} }
     if (score > best) { best = score; try { localStorage.setItem("otterjump.best", String(best)); } catch (e) {} }
     spawnParticles(GOAL.x, GOAL.y - 90, 80, {
       speedMin: 120, speedMax: 520, life: 1.6, size: 8, lift: 360,
@@ -374,6 +404,7 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
         if (winTimer % 0.7 < dt && otter.vy >= 0) otter.vy = -480;
         else otter.vy = 0;
       }
+      if (winTimer >= CLEAR_HOLD) advanceLevel(); // auto-advance after the celebration
       return;
     }
     if (state !== STATE.PLAYING) {
@@ -916,6 +947,12 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
     ctx.textAlign = "left";
     ctx.fillText(score + " / " + FISH.length, left + 30, cy);
 
+    // Level indicator (top-center).
+    ctx.fillStyle = "#0d2a3a";
+    ctx.font = "bold 18px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("Level " + level, cssW / 2, cy);
+
     if (Sound.isMuted()) {
       ctx.fillStyle = "rgba(13,42,58,0.6)";
       ctx.font = "14px system-ui, sans-serif";
@@ -970,26 +1007,25 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
     centerText("The otter runs on its own — you only jump.", cy + 16, 17, "#bfe6ff", "600", maxW);
     centerText("Tap (or press Space) to jump — hold for higher.", cy + 42, 17, "#bfe6ff", "600", maxW);
     pulseHint("Tap to start", cy + 110);
-    if (best > 0) centerText("Best catch: " + best + " fish", cy + 152, 16, "#9ed0ff", "600", maxW);
+    if (bestLevel > 0) centerText("Best: reached Level " + bestLevel, cy + 152, 16, "#9ed0ff", "600", maxW);
   }
 
   function drawDead() {
     overlayPanel();
     const cy = cssH / 2, maxW = cssW - 48;
     centerText("SPLASH!", cy - 50, 66, "#aef0ff", "900", maxW);
-    centerText("Fish collected: " + score, cy + 4, 22, "#dff3ff", "600", maxW);
+    centerText("Level " + level + " — fish caught: " + score, cy + 4, 22, "#dff3ff", "600", maxW);
     pulseHint("Tap to try again", cy + 70);
   }
 
   function drawWon() {
     overlayPanel();
     const cy = cssH / 2, maxW = cssW - 48;
-    centerText("YOU GOT THE SHINY ROCK!", cy - 70, 40, "#ffe6a3", "900", maxW);
-    centerText("A happy otter indeed.", cy - 30, 20, "#dff3ff", "600", maxW);
-    centerText("Fish: " + score + " / " + FISH.length, cy + 14, 26, "#ffffff", "bold", maxW);
-    if (score === FISH.length) centerText("Perfect run! ★", cy + 50, 20, "#9cff8a", "700", maxW);
-    else if (score >= best && best > 0) centerText("New best!", cy + 50, 20, "#9ed0ff", "700", maxW);
-    pulseHint("Tap to play again", cy + 110);
+    centerText("LEVEL " + level + " CLEARED!", cy - 64, 44, "#ffe6a3", "900", maxW);
+    centerText("You fetched the shiny rock!", cy - 24, 20, "#dff3ff", "700", maxW);
+    centerText("Fish: " + score + " / " + FISH.length, cy + 18, 24, "#ffffff", "bold", maxW);
+    if (FISH.length > 0 && score === FISH.length) centerText("Perfect! ★", cy + 52, 18, "#9cff8a", "700", maxW);
+    pulseHint("On to Level " + (level + 1) + " — tap!", cy + 108);
   }
 
   // A static otter pose for the title screen.
