@@ -351,6 +351,17 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
   function selectMode(m) { gameMode = m; LS.set("otterjump.mode", m); }
   function selectDiff(d) { difficulty = d; LS.set("otterjump.diff", d); }
   function goToMenu() { state = STATE.TITLE; inputLock = 0.2; }
+  function cycleCharacter(dir) {
+    const ids = CHARACTERS.map((c) => c.id);
+    let i = ids.indexOf(character);
+    if (i < 0) i = 0;
+    character = ids[(i + dir + ids.length) % ids.length];
+    LS.set("otterjump.char", character);
+  }
+  function characterName() {
+    const c = CHARACTERS.find((c) => c.id === character);
+    return c ? c.name : "Otter";
+  }
 
   // Hit-test the buttons the current screen registered this frame. Runs the first
   // hit and returns true (so it isn't also treated as a jump).
@@ -1128,6 +1139,27 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
   }
 
   // The title screen is the start menu: pick mode + difficulty, then Play.
+  // A bobbing preview of the currently-selected character (image sprite, or the
+  // vector otter for the "otter" id / before images load).
+  function drawCharacterPreview(cx, cy, h) {
+    const img = charImages[character];
+    const bob = Math.sin(elapsed * 2) * 4;
+    if (character !== "otter" && img) {
+      const dw = h * (img.width / img.height);
+      ctx.drawImage(img, cx - dw / 2, cy - h / 2 + bob, dw, h);
+    } else {
+      const ra = otter.runAnim, gr = otter.grounded;
+      otter.runAnim = 0; otter.grounded = true;
+      ctx.save();
+      ctx.translate(cx, cy + bob);
+      const s = (h * 0.9) / otter.h;
+      ctx.scale(s, s);
+      drawOtter(-otter.w / 2, -otter.h / 2);
+      ctx.restore();
+      otter.runAnim = ra; otter.grounded = gr;
+    }
+  }
+
   function drawTitle() {
     overlayPanel();
     const cx = cssW / 2;
@@ -1135,37 +1167,46 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
     const x0 = cx - colW / 2;
     const gap = 12;
     const bw = (colW - gap) / 2;
-    const bh = clamp(cssH * 0.066, 42, 54);
-    const playH = clamp(cssH * 0.085, 50, 66);
+    const bh = clamp(cssH * 0.06, 40, 52);
+    const playH = clamp(cssH * 0.078, 48, 62);
+    const previewH = clamp(cssH * 0.13, 78, 120);
 
-    const blockH = 64 + 28 + (22 + bh) * 2 + 16 + playH + 30;
-    let y = clamp((cssH - blockH) / 2, insets.top + 12, cssH);
+    const blockH = 52 + previewH + 24 + (20 + bh) * 2 + 12 + playH + 26;
+    let y = clamp((cssH - blockH) / 2, insets.top + 8, cssH);
 
-    centerText("OTTER JUMP", y + 28, clamp(colW * 0.14, 34, 58), "#ffe6a3", "900", colW);
-    y += 64;
-    centerText("Run, jump, fetch the shiny rock!", y + 6, 17, "#dff3ff", "700", colW);
-    y += 28;
+    centerText("OTTER JUMP", y + 24, clamp(colW * 0.13, 32, 54), "#ffe6a3", "900", colW);
+    y += 52;
 
-    centerText("Mode", y + 12, 14, "#bfe6ff", "800", colW);
-    y += 22;
+    // --- Character carousel: ‹ [preview] › with the name below ---
+    const arrowW = 46, arrowH = previewH * 0.6, pcy = y + previewH / 2;
+    drawCharacterPreview(cx, pcy, previewH);
+    menuButtons.push({ x: cx - previewH / 2, y: y, w: previewH, h: previewH, action: () => cycleCharacter(1) });
+    menuButton("‹", x0, pcy - arrowH / 2, arrowW, arrowH, false, () => cycleCharacter(-1));
+    menuButton("›", x0 + colW - arrowW, pcy - arrowH / 2, arrowW, arrowH, false, () => cycleCharacter(1));
+    y += previewH;
+    centerText(characterName(), y + 12, 18, "#ffe6a3", "800", colW);
+    y += 24;
+
+    centerText("Mode", y + 10, 13, "#bfe6ff", "800", colW);
+    y += 20;
     menuButton("Normal", x0, y, bw, bh, gameMode === "normal", () => selectMode("normal"));
     menuButton("Roguelike", x0 + bw + gap, y, bw, bh, gameMode === "roguelike", () => selectMode("roguelike"));
-    y += bh + 12;
+    y += bh + 10;
 
-    centerText("Difficulty", y + 12, 14, "#bfe6ff", "800", colW);
-    y += 22;
+    centerText("Difficulty", y + 10, 13, "#bfe6ff", "800", colW);
+    y += 20;
     menuButton("Kid", x0, y, bw, bh, difficulty === "kid", () => selectDiff("kid"));
     menuButton("Normal", x0 + bw + gap, y, bw, bh, difficulty === "normal", () => selectDiff("normal"));
-    y += bh + 16;
+    y += bh + 12;
 
     menuButton("▶  PLAY", x0, y, colW, playH, false, () => startGame(), { primary: true, big: true });
-    y += playH + 22;
+    y += playH + 20;
 
     const b = getBest(gameMode, difficulty);
     const lbl = gameMode === "roguelike"
-      ? (b > 0 ? "Best run: " + b + (b === 1 ? " level" : " levels") : "Roguelike — one life, how far can you get?")
-      : (b > 0 ? "Best: reached Level " + b : "Normal — endless, retry any level");
-    centerText(lbl, y, 14, "#9ed0ff", "700", colW);
+      ? (b > 0 ? "Best run: " + b + (b === 1 ? " level" : " levels") : "Roguelike — one life!")
+      : (b > 0 ? "Best: reached Level " + b : "Normal — endless play");
+    centerText(lbl, y, 13, "#9ed0ff", "700", colW);
   }
 
   function drawDead() {
