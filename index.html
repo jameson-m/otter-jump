@@ -1138,8 +1138,10 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
 
   // Small "back to menu" button near the bottom, used on the dead/cleared screens.
   function menuLink() {
-    const w = 128, h = 42, x = cssW / 2 - w / 2, y = cssH - insets.bottom - h - 16;
-    menuButton("≡  Menu", x, y, w, h, false, () => goToMenu());
+    const w = 104, h = 38;
+    const x = cssW - insets.right - 12 - w; // top-right, clear of the home indicator
+    const y = insets.top + 12;
+    menuButton("≡ Menu", x, y, w, h, false, () => goToMenu());
   }
 
   // The title screen is the start menu: pick mode + difficulty, then Play.
