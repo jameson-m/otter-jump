@@ -294,9 +294,6 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
     FISH.forEach(f => (f.got = false));
   }
 
-  // Seconds the "level cleared" celebration holds before auto-advancing.
-  const CLEAR_HOLD = 1.8;
-
   function startGame() {            // fresh game/run from the title
     level = 1;
     runCleared = 0;
@@ -416,7 +413,7 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
     e.preventDefault();
     Sound.unlock();
     if (handleUiTap(e.clientX, e.clientY)) return;  // a menu button was tapped
-    if (state === STATE.TITLE) return;              // on the menu only the buttons act
+    if (state === STATE.TITLE || state === STATE.WON) return; // menu/cleared screens: only buttons act
     pressJump();
   }, { passive: false });
   window.addEventListener("pointerup", releaseJump);
@@ -483,8 +480,7 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
         if (winTimer % 0.7 < dt && otter.vy >= 0) otter.vy = -480;
         else otter.vy = 0;
       }
-      if (winTimer >= CLEAR_HOLD) advanceLevel(); // auto-advance after the celebration
-      return;
+      return; // wait on the cleared screen until the player presses Next
     }
     if (state !== STATE.PLAYING) {
       // idle bob on title/dead screens for a touch of life
@@ -1236,11 +1232,13 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
   function drawWon() {
     overlayPanel();
     const cy = cssH / 2, maxW = cssW - 48;
-    centerText("LEVEL " + level + " CLEARED!", cy - 70, 44, "#ffe6a3", "900", maxW);
-    centerText("You fetched the shiny rock!", cy - 30, 20, "#dff3ff", "700", maxW);
-    centerText("Fish: " + score + " / " + FISH.length, cy + 12, 24, "#ffffff", "bold", maxW);
-    if (FISH.length > 0 && score === FISH.length) centerText("Perfect! ★", cy + 46, 18, "#9cff8a", "700", maxW);
-    pulseHint("On to Level " + (level + 1) + " — tap!", cy + 100);
+    centerText("LEVEL " + level + " CLEARED!", cy - 96, 42, "#ffe6a3", "900", maxW);
+    centerText("You fetched the shiny rock!", cy - 58, 20, "#dff3ff", "700", maxW);
+    centerText("Fish: " + score + " / " + FISH.length, cy - 18, 24, "#ffffff", "bold", maxW);
+    if (FISH.length > 0 && score === FISH.length) centerText("Perfect! ★", cy + 12, 18, "#9cff8a", "700", maxW);
+    // Wait for an explicit press before moving on.
+    const w = Math.min(cssW - 48, 300), h = clamp(cssH * 0.08, 48, 62);
+    menuButton("Next Level  ▶", cssW / 2 - w / 2, cy + 40, w, h, false, () => advanceLevel(), { primary: true, big: true });
     menuLink();
   }
 
