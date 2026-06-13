@@ -215,11 +215,15 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
   let shake = 0;         // screen-shake magnitude
   let level = 1;             // current level number
   let difficulty = "kid";    // "kid" | "normal" — selection UI arrives with the menu
+  let gameMode = "normal";   // "normal" (forgiving) | "roguelike" (death -> level 1)
+  let runCleared = 0;        // levels cleared in the current run (the roguelike score)
   let best = 0;              // best fish caught in a single level (secondary)
-  let bestLevel = 0;         // highest level reached (primary progression score)
+  let bestLevel = 0;         // highest level reached, Normal mode
+  let bestRogue = 0;         // most levels cleared in a single Roguelike run
   try {
     best = parseInt(localStorage.getItem("otterjump.best") || "0", 10) || 0;
     bestLevel = parseInt(localStorage.getItem("otterjump.bestlevel") || "0", 10) || 0;
+    bestRogue = parseInt(localStorage.getItem("otterjump.bestrogue") || "0", 10) || 0;
   } catch (e) {}
 
   const otter = {
@@ -254,8 +258,9 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
   // Seconds the "level cleared" celebration holds before auto-advancing.
   const CLEAR_HOLD = 1.8;
 
-  function startGame() {            // fresh game from the title
+  function startGame() {            // fresh game/run from the title
     level = 1;
+    runCleared = 0;
     loadLevel(level, difficulty);
     resetRun();
     state = STATE.PLAYING;
@@ -268,10 +273,14 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
     state = STATE.PLAYING;
     inputLock = 0.15;
   }
-  function retryLevel() {           // after a splash — forgiving replay of the same level
-    resetRun();                     // (mode-specific death behaviour arrives with game modes)
-    state = STATE.PLAYING;
-    inputLock = 0.15;
+  function retryLevel() {           // after a splash
+    if (gameMode === "roguelike") {
+      startGame();                  // the run is over — back to Level 1
+    } else {
+      resetRun();                   // forgiving — replay the same level, keep progress
+      state = STATE.PLAYING;
+      inputLock = 0.15;
+    }
   }
 
   // ----------------------------------------------------------------------------
@@ -375,9 +384,12 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
     state = STATE.WON;
     inputLock = 0.6;
     winTimer = 0;
+    runCleared += 1; // a level was cleared this run
     Sound.win();
-    if (level > bestLevel) { bestLevel = level; try { localStorage.setItem("otterjump.bestlevel", String(bestLevel)); } catch (e) {} }
-    if (score > best) { best = score; try { localStorage.setItem("otterjump.best", String(best)); } catch (e) {} }
+    const save = (k, v) => { try { localStorage.setItem(k, String(v)); } catch (e) {} };
+    if (level > bestLevel) { bestLevel = level; save("otterjump.bestlevel", bestLevel); }
+    if (runCleared > bestRogue) { bestRogue = runCleared; save("otterjump.bestrogue", bestRogue); }
+    if (score > best) { best = score; save("otterjump.best", best); }
     spawnParticles(GOAL.x, GOAL.y - 90, 80, {
       speedMin: 120, speedMax: 520, life: 1.6, size: 8, lift: 360,
       color: ["#ffd54a", "#ff7eb6", "#7be0ff", "#9cff8a", "#ffffff", "#c79bff"],
@@ -1007,15 +1019,25 @@ import { PHYS, generateLevel } from "./js/levelgen.js";
     centerText("The otter runs on its own — you only jump.", cy + 16, 17, "#bfe6ff", "600", maxW);
     centerText("Tap (or press Space) to jump — hold for higher.", cy + 42, 17, "#bfe6ff", "600", maxW);
     pulseHint("Tap to start", cy + 110);
-    if (bestLevel > 0) centerText("Best: reached Level " + bestLevel, cy + 152, 16, "#9ed0ff", "600", maxW);
+    if (gameMode === "roguelike") {
+      if (bestRogue > 0) centerText("Best run: " + bestRogue + " levels", cy + 152, 16, "#9ed0ff", "600", maxW);
+    } else if (bestLevel > 0) {
+      centerText("Best: reached Level " + bestLevel, cy + 152, 16, "#9ed0ff", "600", maxW);
+    }
   }
 
   function drawDead() {
     overlayPanel();
     const cy = cssH / 2, maxW = cssW - 48;
-    centerText("SPLASH!", cy - 50, 66, "#aef0ff", "900", maxW);
-    centerText("Level " + level + " — fish caught: " + score, cy + 4, 22, "#dff3ff", "600", maxW);
-    pulseHint("Tap to try again", cy + 70);
+    centerText("SPLASH!", cy - 56, 66, "#aef0ff", "900", maxW);
+    if (gameMode === "roguelike") {
+      centerText("Run over — you cleared " + runCleared + (runCleared === 1 ? " level" : " levels"), cy, 22, "#dff3ff", "700", maxW);
+      if (bestRogue > 0) centerText("Best run: " + bestRogue, cy + 32, 17, "#9ed0ff", "600", maxW);
+      pulseHint("Tap to start a new run", cy + 78);
+    } else {
+      centerText("Level " + level + " — fish caught: " + score, cy, 22, "#dff3ff", "600", maxW);
+      pulseHint("Tap to try again", cy + 64);
+    }
   }
 
   function drawWon() {
