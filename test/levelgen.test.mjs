@@ -1,9 +1,21 @@
-// Validates that the procedural generator produces solvable, in-bounds levels
-// across many levels and both difficulties. Run with: `npm test`.
-import { generateLevel, simulate, reachForStep, PHYS } from "../js/levelgen.js";
+// Validates that the procedural generator produces solvable, in-bounds levels.
+// Run with: `npm test`.
+//
+// Solvability is asserted three independent ways so the check isn't circular with
+// the generator's own simulate()-based filtering:
+//   1. simulate() reaches the goal (the same check the generator uses), AND
+//   2. every gap is within reachForStep() for its height change (pure math), AND
+//   3. urchin platforms satisfy the geometric "land clear, hop, exit" invariants,
+//   plus `fallbacks === 0` proves the by-construction path carries every level
+//   without the trivial safety net ever standing in.
+import { generateLevel, simulate, reachForStep } from "../js/levelgen.js";
 
-const LEVELS = 300;
 const DIFFS = ["kid", "normal"];
+// Dense coverage of the early game, plus a sparse sweep well past the point where
+// levels get very long — this guards the (previously latent) "long level times out
+// the simulator and silently falls back to a flat layout" regression.
+const DENSE = 300;
+const SWEEP = [400, 514, 600, 800, 1000, 1500, 2000, 3000];
 
 let total = 0, unsolvable = 0, fallbacks = 0, multiAttempt = 0, maxAttempts = 0;
 const failures = [];
@@ -21,62 +33,64 @@ function checkBounds(L, label) {
       const prev = L.platforms[i - 1];
       const gap = p.x - (prev.x + prev.w);
       if (gap < 0) problems.push(`platform ${i} overlaps previous (gap ${gap.toFixed(1)})`);
-      // Gap must be within the jump reach for its height change (the guarantee).
-      const up = prev.y - p.y;
-      const reach = reachForStep(up);
+      // (2) Independent solvability: gap within the jump reach for its height change.
+      const reach = reachForStep(prev.y - p.y);
       if (gap > reach + 0.5) {
-        problems.push(`platform ${i} gap ${gap.toFixed(1)} exceeds reach ${reach.toFixed(1)} (up ${up.toFixed(1)})`);
+        problems.push(`platform ${i} gap ${gap.toFixed(1)} exceeds reach ${reach.toFixed(1)}`);
       }
     }
   }
-  // Goal sits on the last platform.
   const last = L.platforms[L.platforms.length - 1];
   if (L.goal.x < last.x || L.goal.x > last.x + last.w) problems.push("goal not on last platform");
-  // Urchins sit on a platform.
+
+  // (3) Independent urchin invariants: the otter must land clear of the urchin
+  // (past the worst-case incoming overshoot) and have room to hop it before the exit.
   for (const u of L.urchins) {
-    const on = L.platforms.some((p) => u.x >= p.x - 1 && u.x <= p.x + p.w + 1 && Math.abs(u.y - p.y) < 1);
-    if (!on) problems.push(`urchin at x=${u.x.toFixed(0)} not on a platform top`);
+    const p = L.platforms.find((q) => Math.abs(u.y - q.y) < 1 && u.x >= q.x - 1 && u.x <= q.x + q.w + 1);
+    if (!p) { problems.push(`urchin at x=${u.x.toFixed(0)} not on a platform top`); continue; }
+    const fromLeft = u.x - p.x;
+    const toRight = p.x + p.w - u.x;
+    if (fromLeft < 240) problems.push(`urchin only ${fromLeft.toFixed(0)} from left edge (< 240)`);
+    if (toRight < 230) problems.push(`urchin only ${toRight.toFixed(0)} from right edge (< 230)`);
   }
+
   if (problems.length) failures.push(`${label}: ${problems.join("; ")}`);
-  return problems.length === 0;
+}
+
+const stripMeta = (L) => { const { meta, ...rest } = L; return rest; };
+
+function checkLevel(level, difficulty) {
+  total++;
+  const label = `${difficulty} L${level}`;
+  const L = generateLevel({ level, difficulty });
+
+  // Determinism: regenerating yields an identical layout.
+  if (JSON.stringify(stripMeta(L)) !== JSON.stringify(stripMeta(generateLevel({ level, difficulty })))) {
+    failures.push(`${label}: not deterministic`);
+  }
+  if (!simulate(L)) { unsolvable++; failures.push(`${label}: UNSOLVABLE`); }
+  checkBounds(L, label);
+  if (L.meta.fallback) { fallbacks++; failures.push(`${label}: used fallback layout`); }
+  if (L.meta.attempts > 1) multiAttempt++;
+  maxAttempts = Math.max(maxAttempts, L.meta.attempts);
 }
 
 for (const difficulty of DIFFS) {
-  for (let level = 1; level <= LEVELS; level++) {
-    total++;
-    const L = generateLevel({ level, difficulty });
-    const label = `${difficulty} L${level}`;
-
-    // Determinism: regenerating yields an identical layout.
-    const L2 = generateLevel({ level, difficulty });
-    if (JSON.stringify(stripMeta(L)) !== JSON.stringify(stripMeta(L2))) {
-      failures.push(`${label}: not deterministic`);
-    }
-
-    if (!simulate(L)) { unsolvable++; failures.push(`${label}: UNSOLVABLE`); }
-    checkBounds(L, label);
-
-    if (L.meta.fallback) fallbacks++;
-    if (L.meta.attempts > 1) multiAttempt++;
-    maxAttempts = Math.max(maxAttempts, L.meta.attempts);
-  }
+  for (let level = 1; level <= DENSE; level++) checkLevel(level, difficulty);
+  for (const level of SWEEP) checkLevel(level, difficulty);
 }
 
-function stripMeta(L) { const { meta, ...rest } = L; return rest; }
-
 console.log(`\nOtter Jump — level generator test`);
-console.log(`  generated:     ${total} levels (${LEVELS} × ${DIFFS.length} difficulties)`);
+console.log(`  generated:     ${total} levels (${DENSE} dense + ${SWEEP.length} swept, × ${DIFFS.length} difficulties)`);
+console.log(`  swept levels:  ${SWEEP.join(", ")}`);
 console.log(`  solvable:      ${total - unsolvable}/${total}`);
 console.log(`  fallback used: ${fallbacks}`);
 console.log(`  needed >1 try: ${multiAttempt} (max ${maxAttempts} attempts)`);
 
-if (failures.length) {
+if (failures.length || unsolvable > 0 || fallbacks > 0) {
   console.error(`\n✗ ${failures.length} problem(s):`);
   for (const f of failures.slice(0, 25)) console.error(`   - ${f}`);
   if (failures.length > 25) console.error(`   ...and ${failures.length - 25} more`);
   process.exit(1);
 }
-// The whole point: every generated level must be beatable, with the by-
-// construction guarantee never having to fall back to the trivial layout.
-if (unsolvable > 0 || fallbacks > 0) process.exit(1);
-console.log(`\n✓ all ${total} generated levels are solvable and within bounds\n`);
+console.log(`\n✓ all ${total} generated levels are solvable, in-bounds, and built by construction\n`);

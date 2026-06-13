@@ -231,7 +231,11 @@ export function simulate(level) {
   let ox = level.startX, oy = level.startTop - OTTER_H;
   let vy = 0, grounded = true, coyote = 0, buffer = 0, ti = 0;
 
-  for (let iter = 0; iter < 24000; iter++) {
+  // Budget enough steps to traverse the whole level (horizontal speed is constant
+  // even mid-jump) plus slack for the final descent, scaled to the level length so
+  // arbitrarily long levels are never falsely timed out into the fallback.
+  const maxIter = Math.ceil(level.goal.x / (RUN_SPEED * STEP)) + 2400;
+  for (let iter = 0; iter < maxIter; iter++) {
     if (ti < targets.length && grounded && ox >= targets[ti]) { buffer = JUMP_BUFFER; ti++; }
 
     const prevY = oy, prevBottom = oy + OTTER_H;
