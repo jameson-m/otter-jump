@@ -1,0 +1,10 @@
+{
+  "name": "otter-jump",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "An installable PWA auto-runner platformer where an otter hops to fetch its favorite shiny rock.",
+  "scripts": {
+    "test": "node test/levelgen.test.mjs"
+  }
+}

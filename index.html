@@ -37,7 +37,8 @@
 </head>
 <body>
 <canvas id="game"></canvas>
-<script>
+<script type="module">
+import { PHYS, generateLevel } from "./js/levelgen.js";
 "use strict";
 (() => {
   // ----------------------------------------------------------------------------
@@ -51,56 +52,29 @@
   // maps a window of those units onto the device screen and fills it — portrait
   // phone, landscape tablet, or desktop — with no letterboxing.
 
-  // --- Physics tuning (pixels & seconds). These constants own the "game feel". ---
-  const RUN_SPEED   = 300;   // constant horizontal auto-run speed
-  const GRAVITY     = 2200;  // downward acceleration
-  const JUMP_V      = 860;   // initial upward jump velocity
-  const JUMP_CUT    = 0.5;   // velocity kept when jump released early (variable height)
-  const COYOTE_TIME = 0.10;  // grace period to jump just after leaving a ledge
-  const JUMP_BUFFER = 0.13;  // grace period to register a jump pressed just before landing
-  const MAX_FALL    = 1300;  // terminal velocity
-  const DEATH_Y     = 820;   // fall below this and it's a splash
+  // --- Physics tuning. Shared with the level generator (js/levelgen.js) via the
+  // PHYS object, so the generator's solvability math and the game never diverge.
+  const {
+    RUN_SPEED, GRAVITY, JUMP_V, JUMP_CUT, COYOTE_TIME, JUMP_BUFFER,
+    MAX_FALL, DEATH_Y, URCHIN_R, SOLID,
+  } = PHYS;
 
-  // --- World geometry ---
-  const GROUND = 580; // top surface of ground-level platforms
-  const MID    = 490;
-  const HIGH   = 410;
-
-  // Each platform is a solid block from its top surface (y) downward.
-  const PLATFORMS = [
-    { x: 0,    y: GROUND, w: 720 }, // start (with tutorial urchin)
-    { x: 870,  y: GROUND, w: 320 },
-    { x: 1310, y: MID,    w: 240 },
-    { x: 1710, y: MID,    w: 220 },
-    { x: 2080, y: GROUND, w: 360 },
-    { x: 2570, y: 500,    w: 200 },
-    { x: 2890, y: HIGH,   w: 200 },
-    { x: 3240, y: 500,    w: 240 },
-    { x: 3640, y: GROUND, w: 700 }, // finish stretch (urchin + shiny rock)
-  ];
-
-  // Spiky sea-urchins sit on top of a platform; touching one is fatal.
-  const URCHIN_R = 22;
-  const URCHINS = [
-    { x: 520,  y: GROUND }, // early "you must jump" moment
-    { x: 4020, y: GROUND }, // last hurdle before the reward
-  ];
-
-  // Fish are optional collectibles for score; many float over gaps at jump height.
-  const FISH = [
-    { x: 320,  y: 510 }, { x: 790,  y: 470 }, { x: 960,  y: 480 },
-    { x: 1080, y: 515 }, { x: 1250, y: 430 }, { x: 1430, y: 420 },
-    { x: 1630, y: 420 }, { x: 1810, y: 420 }, { x: 2010, y: 470 },
-    { x: 2260, y: 510 }, { x: 2490, y: 440 }, { x: 2810, y: 350 },
-    { x: 2990, y: 340 }, { x: 3160, y: 420 }, { x: 3360, y: 430 },
-    { x: 3560, y: 470 }, { x: 3800, y: 515 },
-  ];
-
-  // The goal: the otter's prized shiny rock on a little pedestal.
-  const GOAL = { x: 4200, y: GROUND };
-
-  const WORLD_W = 4400; // for camera clamping
-  const SOLID   = 1000; // how far a platform's solid body extends below its top
+  // --- The active level is procedurally generated (see js/levelgen.js). ---
+  // platforms {x,y,w}, urchins {x,y}, fish {x,y}, goal {x,y}, plus the world
+  // width and the otter's spawn point. These are reassigned by loadLevel().
+  let PLATFORMS, URCHINS, FISH, GOAL, WORLD_W, startX, startTop;
+  function loadLevel(level, difficulty) {
+    const lv = generateLevel({ level, difficulty });
+    PLATFORMS = lv.platforms;
+    URCHINS = lv.urchins;
+    FISH = lv.fish.map((f) => ({ x: f.x, y: f.y, got: false }));
+    GOAL = lv.goal;
+    WORLD_W = lv.worldW;
+    startX = lv.startX;
+    startTop = lv.startTop;
+  }
+  // For now a single generated level; progression across levels comes next.
+  loadLevel(1, "kid");
 
   // ----------------------------------------------------------------------------
   // Tiny procedural sound effects via WebAudio (no asset files).
@@ -243,7 +217,7 @@
   try { best = parseInt(localStorage.getItem("otterjump.best") || "0", 10) || 0; } catch (e) {}
 
   const otter = {
-    x: 90, y: GROUND - 44, w: 50, h: 44,
+    x: startX, y: startTop - PHYS.OTTER_H, w: PHYS.OTTER_W, h: PHYS.OTTER_H,
     vy: 0, grounded: true, coyote: 0, runAnim: 0, jumpPose: 0, face: 1,
   };
 
@@ -255,8 +229,8 @@
   let winTimer = 0;
 
   function resetRun() {
-    otter.x = 90;
-    otter.y = GROUND - otter.h;
+    otter.x = startX;
+    otter.y = startTop - otter.h;
     otter.vy = 0;
     otter.grounded = true;
     otter.coyote = 0;
@@ -917,7 +891,7 @@
     const bw = Math.max(40, right - left);
 
     // Progress bar across the top.
-    const prog = clamp((otter.x - 90) / (GOAL.x - 90), 0, 1);
+    const prog = clamp((otter.x - startX) / (GOAL.x - startX), 0, 1);
     ctx.fillStyle = "rgba(255,255,255,0.45)";
     roundRectPath(left, top, bw, 8, 4); ctx.fill();
     ctx.fillStyle = "#2f9e57";
